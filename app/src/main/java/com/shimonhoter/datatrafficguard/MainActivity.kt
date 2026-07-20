@@ -9,11 +9,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.shimonhoter.datatrafficguard.monitor.AppUsageSnapshot
+import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
 
@@ -21,15 +25,11 @@ class MainActivity : ComponentActivity() {
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            startGuardService(emptySet()) // step 2: idle guard, proves the mechanism doesn't break internet
-        }
-    }
+    ) { result -> if (result.resultCode == RESULT_OK) startGuardService(emptySet()) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* not critical if denied — service still runs, just no visible notification */ }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,9 +37,12 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        val repository = DataUsageRepository(applicationContext)
         setContent {
             DataTrafficGuardTheme {
+                val usage by repository.observeUsage().collectAsState(initial = emptyList())
                 DashboardScaffold(
+                    usage = usage,
                     onTravelModeToggled = { enabled ->
                         if (enabled) requestVpnPermission() else stopGuardService()
                     }
@@ -68,14 +71,14 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DashboardScaffold(onTravelModeToggled: (Boolean) -> Unit = {}) {
+fun DashboardScaffold(
+    usage: List<AppUsageSnapshot> = emptyList(),
+    onTravelModeToggled: (Boolean) -> Unit = {}
+) {
     var travelModeEnabled by remember { mutableStateOf(false) }
 
     Scaffold(topBar = { TopAppBar(title = { Text("DataTrafficGuard") }) }) { padding ->
-        Column(
-            modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
+        Column(modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(20.dp),
@@ -85,24 +88,54 @@ fun DashboardScaffold(onTravelModeToggled: (Boolean) -> Unit = {}) {
                     Column {
                         Text("מצב נסיעה", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (travelModeEnabled) "השירות פעיל (שלב 2: ללא חסימה עדיין)" else "כבוי",
+                            if (travelModeEnabled) "פעיל" else "כבוי",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
                     Switch(
                         checked = travelModeEnabled,
-                        onCheckedChange = {
-                            travelModeEnabled = it
-                            onTravelModeToggled(it)
-                        }
+                        onCheckedChange = { travelModeEnabled = it; onTravelModeToggled(it) }
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("צריכת נתונים לפי אפליקציה", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                items(usage, key = { it.uid }) { app -> AppUsageRow(app) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppUsageRow(app: AppUsageSnapshot) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(app.label, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "מאז הפעלה: ${formatBytes(app.totalBytesSinceBoot)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
             Text(
-                "בדיקת שלב 2: הפעל את המתג, אשר את דיאלוג ה-VPN, וודא שהאינטרנט " +
-                    "ממשיך לעבוד רגיל בכל האפליקציות (כולל האפליקציה הזו).",
-                style = MaterialTheme.typography.bodyMedium
+                "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
+                style = MaterialTheme.typography.bodySmall
             )
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_000_000_000 -> "%.1fGB".format(bytes / 1_000_000_000.0)
+    bytes >= 1_000_000 -> "%.1fMB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "%.1fKB".format(bytes / 1_000.0)
+    else -> "${bytes}B"
 }
