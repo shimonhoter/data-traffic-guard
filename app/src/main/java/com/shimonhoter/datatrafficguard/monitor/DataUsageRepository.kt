@@ -2,7 +2,6 @@ package com.shimonhoter.datatrafficguard.monitor
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.net.TrafficStats
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -14,16 +13,10 @@ data class AppUsageSnapshot(
     val label: String,
     val rxBytesPerSecond: Long,
     val txBytesPerSecond: Long,
-    val totalBytesSinceBoot: Long
+    val totalBytesSinceBoot: Long,
+    val unsupported: Boolean = false
 )
 
-/**
- * Live per-app usage via TrafficStats (no extra permission needed).
- *
- * totalBytesSinceBoot resets on device reboot — a proper "since midnight" /
- * "since travel started" figure needs NetworkStatsManager + subscriberId for
- * cellular, which is a later refinement (noted in the spec, section 5).
- */
 class DataUsageRepository(private val context: Context) {
 
     private data class TrackedApp(val packageName: String, val uid: Int, val label: String)
@@ -45,22 +38,23 @@ class DataUsageRepository(private val context: Context) {
             .toList()
     }
 
-    /** Emits a full snapshot every [intervalMs], sorted by current total usage descending. */
     fun observeUsage(intervalMs: Long = 1000L): Flow<List<AppUsageSnapshot>> = flow {
         val apps = networkApps()
-        val previous = HashMap<Int, Pair<Long, Long>>() // uid -> (rx, tx) at last tick
+        val previous = HashMap<Int, Pair<Long, Long>>()
+
+        // one-time diagnostic row so we always see SOMETHING even if everything else fails
+        emit(listOf(diagRow("נמצאו ${apps.size} אפליקציות להצגה")))
 
         while (true) {
-            val snapshots = apps.mapNotNull { app ->
+            val snapshots = apps.map { app ->
                 val rx = TrafficStats.getUidRxBytes(app.uid)
                 val tx = TrafficStats.getUidTxBytes(app.uid)
-                if (rx < 0 || tx < 0) return@mapNotNull null
+                val isUnsupported = rx < 0 || tx < 0
+                val (prevRx, prevTx) = previous[app.uid] ?: (rx.coerceAtLeast(0) to tx.coerceAtLeast(0))
+                if (!isUnsupported) previous[app.uid] = rx to tx
 
-                val (prevRx, prevTx) = previous[app.uid] ?: (rx to tx)
-                previous[app.uid] = rx to tx
-
-                val rxPerSec = ((rx - prevRx).coerceAtLeast(0) * 1000 / intervalMs)
-                val txPerSec = ((tx - prevTx).coerceAtLeast(0) * 1000 / intervalMs)
+                val rxPerSec = if (isUnsupported) 0 else ((rx - prevRx).coerceAtLeast(0) * 1000 / intervalMs)
+                val txPerSec = if (isUnsupported) 0 else ((tx - prevTx).coerceAtLeast(0) * 1000 / intervalMs)
 
                 AppUsageSnapshot(
                     packageName = app.packageName,
@@ -68,7 +62,8 @@ class DataUsageRepository(private val context: Context) {
                     label = app.label,
                     rxBytesPerSecond = rxPerSec,
                     txBytesPerSecond = txPerSec,
-                    totalBytesSinceBoot = rx + tx
+                    totalBytesSinceBoot = if (isUnsupported) 0 else rx + tx,
+                    unsupported = isUnsupported
                 )
             }.sortedByDescending { it.totalBytesSinceBoot }
 
@@ -76,4 +71,9 @@ class DataUsageRepository(private val context: Context) {
             delay(intervalMs)
         }
     }
+
+    private fun diagRow(message: String) = AppUsageSnapshot(
+        packageName = "diag", uid = -1, label = message,
+        rxBytesPerSecond = 0, txBytesPerSecond = 0, totalBytesSinceBoot = 0, unsupported = true
+    )
 }

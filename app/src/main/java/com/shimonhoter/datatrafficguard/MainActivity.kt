@@ -173,7 +173,7 @@ private fun AppUsageRow(app: AppUsageSnapshot) {
             Column {
                 Text(app.label, style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    "מאז הפעלה: ${formatBytes(app.totalBytesSinceBoot)}",
+                    if (app.unsupported) "לא זמין" else "מאז הפעלה: ${formatBytes(app.totalBytesSinceBoot)}",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
