@@ -11,21 +11,18 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.shimonhoter.datatrafficguard.MainActivity
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.FileInputStream
 import java.io.IOException
 
-/**
- * VPN-based traffic guard — "black hole" approach.
- *
- * Only packages we actually want to BLOCK are added to the tunnel via
- * addAllowedApplication(). Everyone else (including this app itself, which is
- * never added) bypasses the VPN entirely and gets completely normal internet.
- * Packets that do enter the tunnel are read and discarded — those apps simply
- * get no responses, i.e. no network.
- *
- * If blockedPackages is empty, no tunnel is established at all: the guard is
- * fully idle and nothing on the device is affected.
- */
+data class VpnStatus(
+    val tunnelActive: Boolean,
+    val enforcedPackages: Set<String>,
+    val lastError: String? = null
+)
+
 class VpnGuardService : VpnService() {
 
     companion object {
@@ -33,6 +30,9 @@ class VpnGuardService : VpnService() {
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
+
+        private val _status = MutableStateFlow(VpnStatus(tunnelActive = false, enforcedPackages = emptySet()))
+        val status: StateFlow<VpnStatus> = _status.asStateFlow()
     }
 
     private var tunnel: ParcelFileDescriptor? = null
@@ -55,6 +55,7 @@ class VpnGuardService : VpnService() {
 
         if (blockedPackages.isEmpty()) {
             Log.i(TAG, "No blocked packages — guard idle, network fully untouched.")
+            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet())
             return
         }
 
@@ -64,28 +65,38 @@ class VpnGuardService : VpnService() {
             .addRoute("0.0.0.0", 0)
             .addDnsServer("8.8.8.8")
 
-        var addedAny = false
+        val actuallyAdded = mutableSetOf<String>()
         for (pkg in blockedPackages) {
-            if (pkg == packageName) continue // never block ourselves
+            if (pkg == packageName) continue
             try {
                 builder.addAllowedApplication(pkg)
-                addedAny = true
+                actuallyAdded += pkg
             } catch (e: PackageManager.NameNotFoundException) {
                 Log.w(TAG, "Package not found, skipping: $pkg")
             }
         }
-        if (!addedAny) return
+        if (actuallyAdded.isEmpty()) {
+            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "אף חבילה לא נמצאה")
+            return
+        }
 
         tunnel = try {
             builder.establish()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish tunnel", e)
+            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = e.message)
             null
         }
+
+        if (tunnel == null) {
+            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "establish() החזיר null")
+            return
+        }
+
         tunnel?.let { startDrainThread(it) }
+        _status.value = VpnStatus(tunnelActive = true, enforcedPackages = actuallyAdded)
     }
 
-    /** Reads and discards packets from blocked apps — they get no responses at all. */
     private fun startDrainThread(fd: ParcelFileDescriptor) {
         running = true
         drainThread = Thread {
@@ -95,9 +106,7 @@ class VpnGuardService : VpnService() {
                 while (running) {
                     if (input.read(buffer) < 0) break
                 }
-            } catch (e: IOException) {
-                // expected when the tunnel closes during rebuild/stop
-            }
+            } catch (e: IOException) { }
         }.apply { isDaemon = true; start() }
     }
 
@@ -128,11 +137,13 @@ class VpnGuardService : VpnService() {
 
     override fun onDestroy() {
         closeTunnel()
+        _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet())
         super.onDestroy()
     }
 
     override fun onRevoke() {
         closeTunnel()
+        _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "הרשאת VPN בוטלה על ידי המשתמש")
         super.onRevoke()
     }
 }

@@ -27,6 +27,7 @@ import com.shimonhoter.datatrafficguard.monitor.hasUsageAccess
 import com.shimonhoter.datatrafficguard.policy.PolicyEngine
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
+import com.shimonhoter.datatrafficguard.vpn.VpnStatus
 import kotlinx.coroutines.launch
 
 enum class SortMode(val label: String) {
@@ -61,21 +62,27 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        // created once here (NOT inside setContent) so the Flow instances stay stable
+        // across recompositions — recreating them every recomposition was the bug
+        // that made the usage list refresh once and then stop.
         val repository = DataUsageRepository(applicationContext)
         val policyEngine = PolicyEngine(applicationContext)
+        val usageFlow = repository.observeUsage()
 
         setContent {
             DataTrafficGuardTheme {
                 val granted by usageAccessGranted
                 if (granted) {
-                    val usage by repository.observeUsage().collectAsState(initial = emptyList())
+                    val usage by usageFlow.collectAsState(initial = emptyList())
                     val blockedPackages by policyEngine.blockedPackages.collectAsState(initial = emptySet())
+                    val vpnStatus by VpnGuardService.status.collectAsState()
 
                     LaunchedEffect(blockedPackages) { applyBlockedPackages(blockedPackages) }
 
                     DashboardScaffold(
                         usage = usage,
                         blockedPackages = blockedPackages,
+                        vpnStatus = vpnStatus,
                         onToggleBlocked = { pkg, blocked ->
                             lifecycleScope.launch { policyEngine.toggleBlock(pkg, blocked) }
                         }
@@ -94,7 +101,6 @@ class MainActivity : ComponentActivity() {
         usageAccessGranted.value = hasUsageAccess(this)
     }
 
-    /** Ensures the VPN guard reflects the current manually-blocked set. */
     private fun applyBlockedPackages(blocked: Set<String>) {
         if (blocked.isEmpty()) {
             stopGuardService()
@@ -145,6 +151,7 @@ fun UsageAccessRequestScreen(onOpenSettings: () -> Unit) {
 fun DashboardScaffold(
     usage: List<AppUsageSnapshot> = emptyList(),
     blockedPackages: Set<String> = emptySet(),
+    vpnStatus: VpnStatus = VpnStatus(tunnelActive = false, enforcedPackages = emptySet()),
     onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> }
 ) {
     var searchQuery by remember { mutableStateOf("") }
@@ -176,18 +183,22 @@ fun DashboardScaffold(
         Column(modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
 
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(20.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("חסימות פעילות", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "${blockedPackages.size} אפליקציות חסומות · מצב אוטומטי יתווסף בשלב 5",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
+                Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                    Text("חסימות פעילות", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${blockedPackages.size} אפליקציות מסומנות לחסימה",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = if (vpnStatus.tunnelActive)
+                            "מנהרה פעילה · ${vpnStatus.enforcedPackages.size} אפליקציות נאכפות בפועל"
+                        else
+                            "מנהרה לא פעילה" + (vpnStatus.lastError?.let { " · שגיאה: $it" } ?: ""),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (vpnStatus.tunnelActive) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.error
+                    )
                 }
             }
 
