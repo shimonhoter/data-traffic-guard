@@ -1,25 +1,43 @@
 package com.shimonhoter.datatrafficguard.monitor
 
+import android.app.usage.NetworkStats
+import android.app.usage.NetworkStatsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import android.net.TrafficStats
+import android.net.ConnectivityManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import java.util.Calendar
 
 data class AppUsageSnapshot(
     val packageName: String,
     val uid: Int,
     val label: String,
+    val isSystemApp: Boolean,
     val rxBytesPerSecond: Long,
     val txBytesPerSecond: Long,
-    val totalBytesSinceBoot: Long,
+    val totalBytesToday: Long,
     val unsupported: Boolean = false
 )
 
+/**
+ * Real usage source: NetworkStatsManager (requires Usage Access, already granted).
+ * TrafficStats per-other-uid is no longer reliable on modern Android — dropped.
+ *
+ * Note: the underlying OS accounting is batched, not instantaneous — the "per
+ * second" rate may lag a few seconds behind real activity. This is a platform
+ * limitation, not a bug in this app.
+ */
 class DataUsageRepository(private val context: Context) {
 
-    private data class TrackedApp(val packageName: String, val uid: Int, val label: String)
+    private data class TrackedApp(
+        val packageName: String, val uid: Int, val label: String, val isSystemApp: Boolean
+    )
+
+    private val networkStatsManager by lazy {
+        context.getSystemService(Context.NETWORK_STATS_SERVICE) as NetworkStatsManager
+    }
 
     private fun networkApps(): List<TrackedApp> {
         val pm = context.packageManager
@@ -32,48 +50,67 @@ class DataUsageRepository(private val context: Context) {
                 TrackedApp(
                     packageName = app.packageName,
                     uid = app.uid,
-                    label = pm.getApplicationLabel(app).toString()
+                    label = pm.getApplicationLabel(app).toString(),
+                    isSystemApp = (app.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
                 )
             }
             .toList()
     }
 
-    fun observeUsage(intervalMs: Long = 1000L): Flow<List<AppUsageSnapshot>> = flow {
-        val apps = networkApps()
-        val previous = HashMap<Int, Pair<Long, Long>>()
+    /** One pass over ALL uids for both network types — cheap regardless of app count. */
+    private fun queryAllUidBytes(startMillis: Long, endMillis: Long): Map<Int, Pair<Long, Long>> {
+        val totals = HashMap<Int, Pair<Long, Long>>()
+        for (networkType in intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)) {
+            try {
+                val bucket = NetworkStats.Bucket()
+                val stats = networkStatsManager.querySummary(networkType, null, startMillis, endMillis)
+                while (stats.hasNextBucket()) {
+                    stats.getNextBucket(bucket)
+                    val (rx, tx) = totals[bucket.uid] ?: (0L to 0L)
+                    totals[bucket.uid] = (rx + bucket.rxBytes) to (tx + bucket.txBytes)
+                }
+                stats.close()
+            } catch (e: Exception) {
+                // this network type unsupported/unavailable right now — skip it
+            }
+        }
+        return totals
+    }
 
-        // one-time diagnostic row so we always see SOMETHING even if everything else fails
-        emit(listOf(diagRow("נמצאו ${apps.size} אפליקציות להצגה")))
+    private fun startOfToday(): Long {
+        val cal = Calendar.getInstance()
+        cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
+    fun observeUsage(intervalMs: Long = 3000L): Flow<List<AppUsageSnapshot>> = flow {
+        val apps = networkApps()
 
         while (true) {
+            val now = System.currentTimeMillis()
+            val dayStart = startOfToday()
+            val recentTotals = queryAllUidBytes(now - intervalMs, now)
+            val todayTotals = queryAllUidBytes(dayStart, now)
+            val queriesWorked = recentTotals.isNotEmpty() || todayTotals.isNotEmpty()
+
             val snapshots = apps.map { app ->
-                val rx = TrafficStats.getUidRxBytes(app.uid)
-                val tx = TrafficStats.getUidTxBytes(app.uid)
-                val isUnsupported = rx < 0 || tx < 0
-                val (prevRx, prevTx) = previous[app.uid] ?: (rx.coerceAtLeast(0) to tx.coerceAtLeast(0))
-                if (!isUnsupported) previous[app.uid] = rx to tx
-
-                val rxPerSec = if (isUnsupported) 0 else ((rx - prevRx).coerceAtLeast(0) * 1000 / intervalMs)
-                val txPerSec = if (isUnsupported) 0 else ((tx - prevTx).coerceAtLeast(0) * 1000 / intervalMs)
-
+                val recent = recentTotals[app.uid]
+                val today = todayTotals[app.uid]
                 AppUsageSnapshot(
                     packageName = app.packageName,
                     uid = app.uid,
                     label = app.label,
-                    rxBytesPerSecond = rxPerSec,
-                    txBytesPerSecond = txPerSec,
-                    totalBytesSinceBoot = if (isUnsupported) 0 else rx + tx,
-                    unsupported = isUnsupported
+                    isSystemApp = app.isSystemApp,
+                    rxBytesPerSecond = ((recent?.first ?: 0L) * 1000 / intervalMs),
+                    txBytesPerSecond = ((recent?.second ?: 0L) * 1000 / intervalMs),
+                    totalBytesToday = (today?.first ?: 0L) + (today?.second ?: 0L),
+                    unsupported = !queriesWorked
                 )
-            }.sortedByDescending { it.totalBytesSinceBoot }
+            }
 
             emit(snapshots)
             delay(intervalMs)
         }
     }
-
-    private fun diagRow(message: String) = AppUsageSnapshot(
-        packageName = "diag", uid = -1, label = message,
-        rxBytesPerSecond = 0, txBytesPerSecond = 0, totalBytesSinceBoot = 0, unsupported = true
-    )
 }

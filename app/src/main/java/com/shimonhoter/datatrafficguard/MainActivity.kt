@@ -12,6 +12,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,6 +25,19 @@ import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.monitor.hasUsageAccess
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
+
+enum class SortMode(val label: String) {
+    NAME_ASC("שם (א-ב)"),
+    DOWNLOAD_DESC("קצב הורדה (גבוה-נמוך)"),
+    UPLOAD_DESC("קצב העלאה (גבוה-נמוך)"),
+    TOTAL_DESC("סה\"כ מצטבר (גבוה-נמוך)")
+}
+
+enum class CategoryFilter(val label: String) {
+    ALL("הכל"),
+    USER_APPS("אפליקציות משתמש"),
+    SYSTEM_APPS("אפליקציות מערכת/יצרן")
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -55,9 +71,7 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     UsageAccessRequestScreen(
-                        onOpenSettings = {
-                            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                        }
+                        onOpenSettings = { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
                     )
                 }
             }
@@ -96,19 +110,11 @@ fun UsageAccessRequestScreen(onOpenSettings: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                "כדי להציג צריכת נתונים לפי אפליקציה, האפליקציה זקוקה להרשאת " +
-                    "\"גישה לנתוני שימוש\" (Usage Access).",
+                "כדי להציג צריכת נתונים לפי אפליקציה, האפליקציה זקוקה להרשאת \"גישה לנתוני שימוש\".",
                 style = MaterialTheme.typography.bodyLarge
             )
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "בעמוד שייפתח: חפש את DataTrafficGuard ברשימה, ולחץ על המתג להפעלה.",
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = onOpenSettings) {
-                Text("פתח הגדרות")
-            }
+            Button(onClick = onOpenSettings) { Text("פתח הגדרות") }
         }
     }
 }
@@ -120,9 +126,36 @@ fun DashboardScaffold(
     onTravelModeToggled: (Boolean) -> Unit = {}
 ) {
     var travelModeEnabled by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
+    var sortMode by remember { mutableStateOf(SortMode.TOTAL_DESC) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+
+    val displayedUsage = remember(usage, searchQuery, categoryFilter, sortMode) {
+        usage
+            .filter { app ->
+                when (categoryFilter) {
+                    CategoryFilter.ALL -> true
+                    CategoryFilter.USER_APPS -> !app.isSystemApp
+                    CategoryFilter.SYSTEM_APPS -> app.isSystemApp
+                }
+            }
+            .filter { app ->
+                searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true)
+            }
+            .let { list ->
+                when (sortMode) {
+                    SortMode.NAME_ASC -> list.sortedBy { it.label.lowercase() }
+                    SortMode.DOWNLOAD_DESC -> list.sortedByDescending { it.rxBytesPerSecond }
+                    SortMode.UPLOAD_DESC -> list.sortedByDescending { it.txBytesPerSecond }
+                    SortMode.TOTAL_DESC -> list.sortedByDescending { it.totalBytesToday }
+                }
+            }
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("DataTrafficGuard") }) }) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
+
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(20.dp),
@@ -144,19 +177,57 @@ fun DashboardScaffold(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-            Text("צריכת נתונים לפי אפליקציה", style = MaterialTheme.typography.titleMedium)
-            Spacer(modifier = Modifier.height(8.dp))
 
-            if (usage.isEmpty()) {
-                Text(
-                    "טוען נתונים...",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("חיפוש אפליקציה...") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    CategoryFilter.entries.forEach { filter ->
+                        FilterChip(
+                            selected = categoryFilter == filter,
+                            onClick = { categoryFilter = filter },
+                            label = { Text(filter.label, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+
+                Box {
+                    IconButton(onClick = { sortMenuExpanded = true }) {
+                        Icon(Icons.Filled.Sort, contentDescription = "מיון")
+                    }
+                    DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
+                        SortMode.entries.forEach { mode ->
+                            DropdownMenuItem(
+                                text = { Text(mode.label) },
+                                onClick = { sortMode = mode; sortMenuExpanded = false }
+                            )
+                        }
+                    }
+                }
             }
 
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                "מיון: ${sortMode.label}  ·  ${displayedUsage.size} אפליקציות",
+                style = MaterialTheme.typography.labelSmall
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(usage, key = { it.uid }) { app -> AppUsageRow(app) }
+                items(displayedUsage, key = { it.uid }) { app -> AppUsageRow(app) }
             }
         }
     }
@@ -173,14 +244,16 @@ private fun AppUsageRow(app: AppUsageSnapshot) {
             Column {
                 Text(app.label, style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    if (app.unsupported) "לא זמין" else "מאז הפעלה: ${formatBytes(app.totalBytesSinceBoot)}",
+                    if (app.unsupported) "לא זמין" else "היום: ${formatBytes(app.totalBytesToday)}",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-            Text(
-                "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
-                style = MaterialTheme.typography.bodySmall
-            )
+            if (!app.unsupported) {
+                Text(
+                    "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 }
