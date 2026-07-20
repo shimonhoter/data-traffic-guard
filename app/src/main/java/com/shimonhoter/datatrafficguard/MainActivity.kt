@@ -20,11 +20,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import com.shimonhoter.datatrafficguard.monitor.AppUsageSnapshot
 import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.monitor.hasUsageAccess
+import com.shimonhoter.datatrafficguard.policy.PolicyEngine
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
+import kotlinx.coroutines.launch
 
 enum class SortMode(val label: String) {
     NAME_ASC("שם (א-ב)"),
@@ -42,10 +45,11 @@ enum class CategoryFilter(val label: String) {
 class MainActivity : ComponentActivity() {
 
     private val usageAccessGranted = mutableStateOf(false)
+    private var pendingBlocked: Set<String> = emptySet()
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { result -> if (result.resultCode == RESULT_OK) startGuardService(emptySet()) }
+    ) { result -> if (result.resultCode == RESULT_OK) startGuardService(pendingBlocked) }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -58,15 +62,22 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
         val repository = DataUsageRepository(applicationContext)
+        val policyEngine = PolicyEngine(applicationContext)
+
         setContent {
             DataTrafficGuardTheme {
                 val granted by usageAccessGranted
                 if (granted) {
                     val usage by repository.observeUsage().collectAsState(initial = emptyList())
+                    val blockedPackages by policyEngine.blockedPackages.collectAsState(initial = emptySet())
+
+                    LaunchedEffect(blockedPackages) { applyBlockedPackages(blockedPackages) }
+
                     DashboardScaffold(
                         usage = usage,
-                        onTravelModeToggled = { enabled ->
-                            if (enabled) requestVpnPermission() else stopGuardService()
+                        blockedPackages = blockedPackages,
+                        onToggleBlocked = { pkg, blocked ->
+                            lifecycleScope.launch { policyEngine.toggleBlock(pkg, blocked) }
                         }
                     )
                 } else {
@@ -83,9 +94,19 @@ class MainActivity : ComponentActivity() {
         usageAccessGranted.value = hasUsageAccess(this)
     }
 
-    private fun requestVpnPermission() {
+    /** Ensures the VPN guard reflects the current manually-blocked set. */
+    private fun applyBlockedPackages(blocked: Set<String>) {
+        if (blocked.isEmpty()) {
+            stopGuardService()
+            return
+        }
         val intent = VpnService.prepare(this)
-        if (intent != null) vpnPermissionLauncher.launch(intent) else startGuardService(emptySet())
+        if (intent != null) {
+            pendingBlocked = blocked
+            vpnPermissionLauncher.launch(intent)
+        } else {
+            startGuardService(blocked)
+        }
     }
 
     private fun startGuardService(blocked: Set<String>) {
@@ -123,9 +144,9 @@ fun UsageAccessRequestScreen(onOpenSettings: () -> Unit) {
 @Composable
 fun DashboardScaffold(
     usage: List<AppUsageSnapshot> = emptyList(),
-    onTravelModeToggled: (Boolean) -> Unit = {}
+    blockedPackages: Set<String> = emptySet(),
+    onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> }
 ) {
-    var travelModeEnabled by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
     var sortMode by remember { mutableStateOf(SortMode.TOTAL_DESC) }
@@ -140,9 +161,7 @@ fun DashboardScaffold(
                     CategoryFilter.SYSTEM_APPS -> app.isSystemApp
                 }
             }
-            .filter { app ->
-                searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true)
-            }
+            .filter { app -> searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true) }
             .let { list ->
                 when (sortMode) {
                     SortMode.NAME_ASC -> list.sortedBy { it.label.lowercase() }
@@ -163,16 +182,12 @@ fun DashboardScaffold(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("מצב נסיעה", style = MaterialTheme.typography.titleMedium)
+                        Text("חסימות פעילות", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (travelModeEnabled) "פעיל" else "כבוי",
+                            "${blockedPackages.size} אפליקציות חסומות · מצב אוטומטי יתווסף בשלב 5",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    Switch(
-                        checked = travelModeEnabled,
-                        onCheckedChange = { travelModeEnabled = it; onTravelModeToggled(it) }
-                    )
                 }
             }
 
@@ -203,7 +218,6 @@ fun DashboardScaffold(
                         )
                     }
                 }
-
                 Box {
                     IconButton(onClick = { sortMenuExpanded = true }) {
                         Icon(Icons.Filled.Sort, contentDescription = "מיון")
@@ -227,32 +241,46 @@ fun DashboardScaffold(
             Spacer(modifier = Modifier.height(8.dp))
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(displayedUsage, key = { it.uid }) { app -> AppUsageRow(app) }
+                items(displayedUsage, key = { it.uid }) { app ->
+                    AppUsageRow(
+                        app = app,
+                        isBlocked = blockedPackages.contains(app.packageName),
+                        onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AppUsageRow(app: AppUsageSnapshot) {
+private fun AppUsageRow(
+    app: AppUsageSnapshot,
+    isBlocked: Boolean,
+    onToggleBlocked: (Boolean) -> Unit
+) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(app.label, style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (app.unsupported) "לא זמין" else "היום: ${formatBytes(app.totalBytesToday)}",
                     style = MaterialTheme.typography.bodySmall
                 )
+                if (!app.unsupported) {
+                    Text(
+                        "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
-            if (!app.unsupported) {
-                Text(
-                    "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
-                    style = MaterialTheme.typography.bodySmall
-                )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("חסום", style = MaterialTheme.typography.labelSmall)
+                Switch(checked = isBlocked, onCheckedChange = onToggleBlocked)
             }
         }
     }

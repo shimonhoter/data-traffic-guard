@@ -1,20 +1,37 @@
 package com.shimonhoter.datatrafficguard.policy
 
-/**
- * Decides, for a given package, whether it should currently have network access.
- *
- * Two modes:
- *  - Manual: per-package allow/block set by the user (see PolicyStore).
- *  - Travel Mode (foreground-only): only the package reported as foreground by
- *    ForegroundWatcherService is allowed, plus a fixed whitelist (phone, SMS, nav).
- *
- * TODO (step 4/5): combine PolicyStore state + ForegroundWatcherService output,
- * emit the allowed-package set that VpnGuardService.rebuild() should apply.
- */
-class PolicyEngine
+import android.content.Context
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+private val Context.policyDataStore by preferencesDataStore(name = "policy_store")
+private val BLOCKED_PACKAGES_KEY = stringSetPreferencesKey("blocked_packages")
+
+/** Persists per-package manual block/allow choices across app restarts. */
+class PolicyStore(private val context: Context) {
+    val blockedPackages: Flow<Set<String>> = context.policyDataStore.data
+        .map { prefs -> prefs[BLOCKED_PACKAGES_KEY] ?: emptySet() }
+
+    suspend fun setBlocked(packageName: String, blocked: Boolean) {
+        context.policyDataStore.edit { prefs ->
+            val current = prefs[BLOCKED_PACKAGES_KEY] ?: emptySet()
+            prefs[BLOCKED_PACKAGES_KEY] = if (blocked) current + packageName else current - packageName
+        }
+    }
+}
 
 /**
- * Persists per-package user settings (blocked/allowed, whitelist) via DataStore.
- * TODO (step 4): implement with androidx.datastore.preferences.
+ * Manual policy only (step 4). Travel Mode / foreground-only auto logic
+ * (step 5) will layer on top of this later via ForegroundWatcherService.
  */
-class PolicyStore
+class PolicyEngine(context: Context) {
+    private val store = PolicyStore(context)
+    val blockedPackages: Flow<Set<String>> = store.blockedPackages
+
+    suspend fun toggleBlock(packageName: String, blocked: Boolean) {
+        store.setBlocked(packageName, blocked)
+    }
+}
