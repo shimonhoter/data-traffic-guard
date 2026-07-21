@@ -38,6 +38,8 @@ import com.shimonhoter.datatrafficguard.vpn.VpnServiceLauncher
 import com.shimonhoter.datatrafficguard.vpn.VpnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -81,7 +83,12 @@ class MainActivity : ComponentActivity() {
         val repository = DataUsageRepository(applicationContext)
         val policyEngine = PolicyEngine(applicationContext)
         val quotaEngine = QuotaEngine(applicationContext)
-        val usageFlow = repository.observeUsage()
+        val quotaStateFlow = quotaEngine.settings.stateIn(
+            lifecycleScope, SharingStarted.Eagerly, QuotaSettings()
+        )
+        val usageFlow = repository.observeUsage(
+            cycleStartMillisProvider = { quotaStateFlow.value.cycleStartMillis }
+        )
 
         setContent {
             DataTrafficGuardTheme {
@@ -455,6 +462,11 @@ private fun AppUsageRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (!app.unsupported) {
+                    Text(
+                        "מצטבר מתחילת המחזור: ${formatBytes(app.totalBytesSinceCycleStart)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
                         style = MaterialTheme.typography.bodySmall,

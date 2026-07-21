@@ -20,6 +20,10 @@ data class AppUsageSnapshot(
     val rxBytesPerSecond: Long,
     val txBytesPerSecond: Long,
     val totalBytesToday: Long,
+    /** Cumulative since the quota cycle started (same window as the "צריכה כוללת" card) —
+     *  lets you compare a specific app's number directly against Android's own Data Usage
+     *  screen over the same period, instead of "today" which mixes in pre-cycle usage. */
+    val totalBytesSinceCycleStart: Long = 0L,
     val unsupported: Boolean = false
 )
 
@@ -109,7 +113,10 @@ class DataUsageRepository(private val context: Context) {
      * all of that work to a background dispatcher; only the emitted snapshots
      * cross back to the UI thread via collectAsState.
      */
-    fun observeUsage(intervalMs: Long = 3000L): Flow<List<AppUsageSnapshot>> = flow {
+    fun observeUsage(
+        intervalMs: Long = 3000L,
+        cycleStartMillisProvider: () -> Long = { 0L }
+    ): Flow<List<AppUsageSnapshot>> = flow {
         val apps = try {
             networkApps()
         } catch (e: Exception) {
@@ -121,12 +128,15 @@ class DataUsageRepository(private val context: Context) {
             try {
                 val now = System.currentTimeMillis()
                 val dayStart = startOfToday()
+                val cycleStart = cycleStartMillisProvider()
                 val recentTotals = queryAllUidBytes(now - intervalMs, now)
                 val todayTotals = queryAllUidBytes(dayStart, now)
+                val cycleTotals = if (cycleStart in 1 until now) queryAllUidBytes(cycleStart, now) else emptyMap()
 
                 val snapshots = apps.map { app ->
                     val recent = recentTotals[app.uid]
                     val today = todayTotals[app.uid]
+                    val cycle = cycleTotals[app.uid]
                     AppUsageSnapshot(
                         packageName = app.packageName,
                         uid = app.uid,
@@ -135,6 +145,7 @@ class DataUsageRepository(private val context: Context) {
                         rxBytesPerSecond = ((recent?.first ?: 0L) * 1000 / intervalMs),
                         txBytesPerSecond = ((recent?.second ?: 0L) * 1000 / intervalMs),
                         totalBytesToday = (today?.first ?: 0L) + (today?.second ?: 0L),
+                        totalBytesSinceCycleStart = (cycle?.first ?: 0L) + (cycle?.second ?: 0L),
                         unsupported = false
                     )
                 }
