@@ -11,6 +11,7 @@ class ForegroundWatcher {
     fun currentForegroundPackage(context: Context): String? {
         val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val now = System.currentTimeMillis()
+
         val events = usm.queryEvents(lastCheckedMillis, now)
         val event = UsageEvents.Event()
         while (events.hasNextEvent()) {
@@ -20,6 +21,19 @@ class ForegroundWatcher {
             }
         }
         lastCheckedMillis = now
+
+        if (lastKnownForeground == null) {
+            lastKnownForeground = bootstrapFromUsageStats(usm, now)
+        }
         return lastKnownForeground
+    }
+
+    private fun bootstrapFromUsageStats(usm: UsageStatsManager, now: Long): String? {
+        return try {
+            val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, now - 60 * 60_000, now)
+            stats?.maxByOrNull { it.lastTimeUsed }?.packageName
+        } catch (e: Exception) {
+            null
+        }
     }
 }
