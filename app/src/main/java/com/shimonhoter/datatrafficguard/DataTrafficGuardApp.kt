@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.VpnService
 import android.util.Log
 import com.shimonhoter.datatrafficguard.policy.PolicyEngine
+import com.shimonhoter.datatrafficguard.quota.QuotaChecker
+import com.shimonhoter.datatrafficguard.quota.QuotaCheckReceiver
 import com.shimonhoter.datatrafficguard.vpn.VpnServiceLauncher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +29,16 @@ class DataTrafficGuardApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        QuotaCheckReceiver.schedule(applicationContext)
+        appScope.launch {
+            try {
+                QuotaChecker.checkAndNotify(applicationContext)
+            } catch (e: Exception) {
+                Log.e(TAG, "Immediate quota check failed", e)
+            }
+        }
+
         appScope.launch {
             try {
                 val policyEngine = PolicyEngine(applicationContext)

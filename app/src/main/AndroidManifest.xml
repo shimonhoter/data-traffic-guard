@@ -49,6 +49,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <receiver
+            android:name=".quota.QuotaCheckReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <!-- Wakes the process right after boot so DataTrafficGuardApp.onCreate() can
              start the guard service immediately, before the user opens the app. -->
         <receiver

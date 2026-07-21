@@ -70,6 +70,26 @@ class DataUsageRepository(private val context: Context) {
         return totals
     }
 
+    /**
+     * Total device-wide data used since [startMillis] across mobile + WiFi — this is the
+     * "כל האפליקציות" total (matches what Android's own Data Usage screen would show),
+     * not just the apps we enumerate individually.
+     */
+    fun totalDeviceBytesSince(startMillis: Long): Long {
+        val now = System.currentTimeMillis()
+        if (startMillis <= 0L || startMillis >= now) return 0L
+        var total = 0L
+        for (networkType in intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)) {
+            try {
+                val bucket = networkStatsManager.querySummaryForDevice(networkType, null, startMillis, now)
+                total += bucket.rxBytes + bucket.txBytes
+            } catch (e: Exception) {
+                // this network type unsupported/unavailable right now — skip it, don't crash
+            }
+        }
+        return total
+    }
+
     private fun startOfToday(): Long {
         val cal = Calendar.getInstance()
         cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0)

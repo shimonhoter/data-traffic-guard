@@ -25,12 +25,17 @@ import com.shimonhoter.datatrafficguard.monitor.AppUsageSnapshot
 import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.monitor.hasUsageAccess
 import com.shimonhoter.datatrafficguard.policy.PolicyEngine
+import com.shimonhoter.datatrafficguard.quota.QuotaEngine
+import com.shimonhoter.datatrafficguard.quota.QuotaSettings
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.GuardMode
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
 import com.shimonhoter.datatrafficguard.vpn.VpnServiceLauncher
 import com.shimonhoter.datatrafficguard.vpn.VpnStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class SortMode(val label: String) {
     NAME_ASC("שם (א-ב)"),
@@ -71,6 +76,7 @@ class MainActivity : ComponentActivity() {
         }
         val repository = DataUsageRepository(applicationContext)
         val policyEngine = PolicyEngine(applicationContext)
+        val quotaEngine = QuotaEngine(applicationContext)
         val usageFlow = repository.observeUsage()
 
         setContent {
@@ -81,6 +87,16 @@ class MainActivity : ComponentActivity() {
                     val blockedPackages by policyEngine.blockedPackages.collectAsState(initial = emptySet())
                     val travelModeEnabled by policyEngine.travelModeEnabled.collectAsState(initial = false)
                     val vpnStatus by VpnGuardService.status.collectAsState()
+                    val quotaSettings by quotaEngine.settings.collectAsState(initial = QuotaSettings())
+
+                    val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
+                        while (true) {
+                            value = withContext(Dispatchers.Default) {
+                                repository.totalDeviceBytesSince(quotaSettings.cycleStartMillis)
+                            }
+                            delay(5000L)
+                        }
+                    }
 
                     LaunchedEffect(travelModeEnabled, blockedPackages) {
                         applyPolicy(travelModeEnabled, blockedPackages)
@@ -91,11 +107,19 @@ class MainActivity : ComponentActivity() {
                         blockedPackages = blockedPackages,
                         travelModeEnabled = travelModeEnabled,
                         vpnStatus = vpnStatus,
+                        quotaSettings = quotaSettings,
+                        totalUsedBytes = totalUsedBytes,
                         onToggleBlocked = { pkg, blocked ->
                             lifecycleScope.launch { policyEngine.toggleBlock(pkg, blocked) }
                         },
                         onTravelModeToggled = { enabled ->
                             lifecycleScope.launch { policyEngine.setTravelMode(enabled) }
+                        },
+                        onSetQuota = { quotaBytes, thresholdPercent ->
+                            lifecycleScope.launch { quotaEngine.setQuota(quotaBytes, thresholdPercent) }
+                        },
+                        onResetCycle = {
+                            lifecycleScope.launch { quotaEngine.resetCycle() }
                         }
                     )
                 } else {
@@ -171,13 +195,18 @@ fun DashboardScaffold(
     blockedPackages: Set<String> = emptySet(),
     travelModeEnabled: Boolean = false,
     vpnStatus: VpnStatus = VpnStatus(tunnelActive = false),
+    quotaSettings: QuotaSettings = QuotaSettings(),
+    totalUsedBytes: Long = 0L,
     onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> },
-    onTravelModeToggled: (Boolean) -> Unit = {}
+    onTravelModeToggled: (Boolean) -> Unit = {},
+    onSetQuota: (Long, Int) -> Unit = { _, _ -> },
+    onResetCycle: () -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
     var sortMode by remember { mutableStateOf(SortMode.TOTAL_DESC) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var showQuotaDialog by remember { mutableStateOf(false) }
 
     val displayedUsage = remember(usage, searchQuery, categoryFilter, sortMode) {
         usage
@@ -244,6 +273,15 @@ fun DashboardScaffold(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            QuotaCard(
+                quotaSettings = quotaSettings,
+                usedBytes = totalUsedBytes,
+                onEditClick = { showQuotaDialog = true },
+                onResetCycle = onResetCycle
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -304,6 +342,17 @@ fun DashboardScaffold(
             }
         }
     }
+
+    if (showQuotaDialog) {
+        QuotaEditDialog(
+            quotaSettings = quotaSettings,
+            onDismiss = { showQuotaDialog = false },
+            onSave = { quotaBytes, thresholdPercent ->
+                onSetQuota(quotaBytes, thresholdPercent)
+                showQuotaDialog = false
+            }
+        )
+    }
 }
 
 @Composable
@@ -345,4 +394,116 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1_000_000 -> "%.1fMB".format(bytes / 1_000_000.0)
     bytes >= 1_000 -> "%.1fKB".format(bytes / 1_000.0)
     else -> "${bytes}B"
+}
+
+@Composable
+private fun QuotaCard(
+    quotaSettings: QuotaSettings,
+    usedBytes: Long,
+    onEditClick: () -> Unit,
+    onResetCycle: () -> Unit
+) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("צריכה כוללת (כל האפליקציות)", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = onEditClick) {
+                    Text(if (quotaSettings.isConfigured) "ערוך" else "הגדר מכסה")
+                }
+            }
+
+            if (!quotaSettings.isConfigured) {
+                Text(
+                    "לא הוגדרה מכסת נתונים — לחץ \"הגדר מכסה\" כדי לקבל התראות בהתקרבות לסוף החבילה.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                return@Column
+            }
+
+            val percent = ((usedBytes.toDouble() / quotaSettings.quotaBytes.toDouble()) * 100)
+                .toInt().coerceAtLeast(0)
+            val overThreshold = percent >= quotaSettings.thresholdPercent
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "${formatBytes(usedBytes)} מתוך ${formatBytes(quotaSettings.quotaBytes)} · $percent%",
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { (percent / 100f).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth(),
+                color = if (overThreshold) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "סף התראה: ${quotaSettings.thresholdPercent}% · לאחר מכן התראה כל 10%",
+                style = MaterialTheme.typography.labelSmall
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            TextButton(onClick = onResetCycle) { Text("אפס מחזור (חבילה חדשה)") }
+        }
+    }
+}
+
+@Composable
+private fun QuotaEditDialog(
+    quotaSettings: QuotaSettings,
+    onDismiss: () -> Unit,
+    onSave: (Long, Int) -> Unit
+) {
+    var amountText by remember {
+        mutableStateOf(
+            if (quotaSettings.quotaBytes > 0L) (quotaSettings.quotaBytes / 1_000_000L).toString() else ""
+        )
+    }
+    var thresholdText by remember { mutableStateOf(quotaSettings.thresholdPercent.toString()) }
+
+    val amountMb = amountText.toLongOrNull()
+    val thresholdPercent = thresholdText.toIntOrNull()
+    val isValid = amountMb != null && amountMb > 0 && thresholdPercent != null &&
+        thresholdPercent in 1..99
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("הגדרת מכסת נתונים") },
+        text = {
+            Column {
+                Text(
+                    "הזן את כמות הנתונים הכוללת של החבילה (ב-MB) ואת אחוז הסף להתראה ראשונה. " +
+                        "משם והלאה תישלח התראה נוספת כל 10%.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it.filter(Char::isDigit) },
+                    label = { Text("כמות נתונים (MB)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = thresholdText,
+                    onValueChange = { thresholdText = it.filter(Char::isDigit) },
+                    label = { Text("סף התראה ראשונה (%)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isValid,
+                onClick = { onSave((amountMb!!) * 1_000_000L, thresholdPercent!!) }
+            ) { Text("שמור והתחל מחזור חדש") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("ביטול") }
+        }
+    )
 }
