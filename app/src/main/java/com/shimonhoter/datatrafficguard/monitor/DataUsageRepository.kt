@@ -21,14 +21,6 @@ data class AppUsageSnapshot(
     val unsupported: Boolean = false
 )
 
-/**
- * Real usage source: NetworkStatsManager (requires Usage Access, already granted).
- * TrafficStats per-other-uid is no longer reliable on modern Android — dropped.
- *
- * Note: the underlying OS accounting is batched, not instantaneous — the "per
- * second" rate may lag a few seconds behind real activity. This is a platform
- * limitation, not a bug in this app.
- */
 class DataUsageRepository(private val context: Context) {
 
     private data class TrackedApp(
@@ -57,7 +49,6 @@ class DataUsageRepository(private val context: Context) {
             .toList()
     }
 
-    /** One pass over ALL uids for both network types — cheap regardless of app count. */
     private fun queryAllUidBytes(startMillis: Long, endMillis: Long): Map<Int, Pair<Long, Long>> {
         val totals = HashMap<Int, Pair<Long, Long>>()
         for (networkType in intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)) {
@@ -71,7 +62,7 @@ class DataUsageRepository(private val context: Context) {
                 }
                 stats.close()
             } catch (e: Exception) {
-                // this network type unsupported/unavailable right now — skip it
+                // this network type unsupported/unavailable right now — skip it, don't crash
             }
         }
         return totals
@@ -84,32 +75,49 @@ class DataUsageRepository(private val context: Context) {
         return cal.timeInMillis
     }
 
+    private fun errorRow(message: String) = AppUsageSnapshot(
+        packageName = "error", uid = -1, label = "שגיאה: $message", isSystemApp = false,
+        rxBytesPerSecond = 0, txBytesPerSecond = 0, totalBytesToday = 0, unsupported = true
+    )
+
+    /**
+     * Every step that can throw is caught individually so a single failure
+     * shows up as a visible error row instead of crashing the whole app —
+     * this lets us see the real exception without needing logcat access.
+     */
     fun observeUsage(intervalMs: Long = 3000L): Flow<List<AppUsageSnapshot>> = flow {
-        val apps = networkApps()
+        val apps = try {
+            networkApps()
+        } catch (e: Exception) {
+            emit(listOf(errorRow("networkApps(): ${e::class.simpleName} - ${e.message}")))
+            emptyList()
+        }
 
         while (true) {
-            val now = System.currentTimeMillis()
-            val dayStart = startOfToday()
-            val recentTotals = queryAllUidBytes(now - intervalMs, now)
-            val todayTotals = queryAllUidBytes(dayStart, now)
-            val queriesWorked = recentTotals.isNotEmpty() || todayTotals.isNotEmpty()
+            try {
+                val now = System.currentTimeMillis()
+                val dayStart = startOfToday()
+                val recentTotals = queryAllUidBytes(now - intervalMs, now)
+                val todayTotals = queryAllUidBytes(dayStart, now)
 
-            val snapshots = apps.map { app ->
-                val recent = recentTotals[app.uid]
-                val today = todayTotals[app.uid]
-                AppUsageSnapshot(
-                    packageName = app.packageName,
-                    uid = app.uid,
-                    label = app.label,
-                    isSystemApp = app.isSystemApp,
-                    rxBytesPerSecond = ((recent?.first ?: 0L) * 1000 / intervalMs),
-                    txBytesPerSecond = ((recent?.second ?: 0L) * 1000 / intervalMs),
-                    totalBytesToday = (today?.first ?: 0L) + (today?.second ?: 0L),
-                    unsupported = !queriesWorked
-                )
+                val snapshots = apps.map { app ->
+                    val recent = recentTotals[app.uid]
+                    val today = todayTotals[app.uid]
+                    AppUsageSnapshot(
+                        packageName = app.packageName,
+                        uid = app.uid,
+                        label = app.label,
+                        isSystemApp = app.isSystemApp,
+                        rxBytesPerSecond = ((recent?.first ?: 0L) * 1000 / intervalMs),
+                        txBytesPerSecond = ((recent?.second ?: 0L) * 1000 / intervalMs),
+                        totalBytesToday = (today?.first ?: 0L) + (today?.second ?: 0L),
+                        unsupported = false
+                    )
+                }
+                emit(snapshots)
+            } catch (e: Exception) {
+                emit(listOf(errorRow("${e::class.simpleName} - ${e.message}")))
             }
-
-            emit(snapshots)
             delay(intervalMs)
         }
     }
