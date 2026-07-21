@@ -28,6 +28,7 @@ import com.shimonhoter.datatrafficguard.policy.PolicyEngine
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
 import com.shimonhoter.datatrafficguard.vpn.GuardMode
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
+import com.shimonhoter.datatrafficguard.vpn.VpnServiceLauncher
 import com.shimonhoter.datatrafficguard.vpn.VpnStatus
 import kotlinx.coroutines.launch
 
@@ -137,20 +138,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTravelModeService() {
-        val serviceIntent = Intent(this, VpnGuardService::class.java).apply {
-            putExtra(VpnGuardService.EXTRA_MODE, "travel")
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
-        else startService(serviceIntent)
+        VpnServiceLauncher.launch(this, travelModeEnabled = true, blocked = emptySet())
     }
 
     private fun startGuardService(blocked: Set<String>) {
-        val serviceIntent = Intent(this, VpnGuardService::class.java).apply {
-            putExtra(VpnGuardService.EXTRA_MODE, "manual")
-            putStringArrayListExtra(VpnGuardService.EXTRA_BLOCKED_PACKAGES, ArrayList(blocked))
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
-        else startService(serviceIntent)
+        VpnServiceLauncher.launch(this, travelModeEnabled = false, blocked = blocked)
     }
 }
 
