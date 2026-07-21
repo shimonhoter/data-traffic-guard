@@ -1,6 +1,7 @@
 package com.shimonhoter.datatrafficguard
 
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +24,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.shimonhoter.datatrafficguard.monitor.AppUsageSnapshot
@@ -472,6 +474,24 @@ private fun AppUsageRow(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (isBlocked && (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0)) {
+                        val context = LocalContext.current
+                        Text(
+                            "חסום, אך חיבור שכבר היה פתוח ממשיך לזרום עד שיסתיים מעצמו",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        TextButton(
+                            onClick = {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                        data = Uri.parse("package:${app.packageName}")
+                                    }
+                                )
+                            },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
+                        ) { Text("עצור עכשיו (Force Stop)", style = MaterialTheme.typography.labelSmall) }
+                    }
                 }
             }
             Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
