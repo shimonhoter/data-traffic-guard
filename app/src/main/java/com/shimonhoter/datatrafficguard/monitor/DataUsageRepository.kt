@@ -5,9 +5,11 @@ import android.app.usage.NetworkStatsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.net.ConnectivityManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import java.util.Calendar
 
 data class AppUsageSnapshot(
@@ -81,9 +83,11 @@ class DataUsageRepository(private val context: Context) {
     )
 
     /**
-     * Every step that can throw is caught individually so a single failure
-     * shows up as a visible error row instead of crashing the whole app —
-     * this lets us see the real exception without needing logcat access.
+     * flowOn(Dispatchers.Default): enumerating ~500+ installed apps and running
+     * NetworkStatsManager queries every few seconds is too heavy for the main
+     * thread — doing it there caused ANRs ("App Not Responding"). This moves
+     * all of that work to a background dispatcher; only the emitted snapshots
+     * cross back to the UI thread via collectAsState.
      */
     fun observeUsage(intervalMs: Long = 3000L): Flow<List<AppUsageSnapshot>> = flow {
         val apps = try {
@@ -120,5 +124,5 @@ class DataUsageRepository(private val context: Context) {
             }
             delay(intervalMs)
         }
-    }
+    }.flowOn(Dispatchers.Default)
 }
