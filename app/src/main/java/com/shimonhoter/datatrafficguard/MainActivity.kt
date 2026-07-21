@@ -461,30 +461,16 @@ private fun AppUsageRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(app.label, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    if (app.unsupported) "לא זמין" else "היום: ${formatBytes(app.totalBytesToday)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (!app.unsupported) {
+                if (app.unsupported) {
+                    Text("לא זמין", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (isBlocked) {
                     Text(
-                        "מצטבר מתחילת המחזור: ${formatBytes(app.totalBytesSinceCycleStart)}",
+                        "חסום — נתוני צריכה לא מוצגים (לרוב ניסיונות שנחסמו, לא נתונים אמיתיים)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (isBlocked && (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0)) {
+                    if (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0) {
                         val context = LocalContext.current
-                        Text(
-                            "חסום — הקצב המוצג משויך לרוב לניסיונות שנחסמו (לא נתונים אמיתיים);" +
-                                " לעיתים נדירות זה חיבור קודם שעדיין פעיל",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                         TextButton(
                             onClick = {
                                 context.startActivity(
@@ -494,8 +480,19 @@ private fun AppUsageRow(
                                 )
                             },
                             contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
-                        ) { Text("עצור בכל זאת (Force Stop)", style = MaterialTheme.typography.labelSmall) }
+                        ) { Text("עדיין רואה קצב חי? עצור בכל זאת (Force Stop)", style = MaterialTheme.typography.labelSmall) }
                     }
+                } else {
+                    Text(
+                        "היום: ${formatBytes(app.totalBytesToday)} · מצטבר מתחילת המחזור: ${formatBytes(app.totalBytesSinceCycleStart)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
@@ -523,55 +520,47 @@ private fun QuotaCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("צריכה כוללת (כל האפליקציות)", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = onEditClick) {
-                    Text(if (quotaSettings.isConfigured) "ערוך" else "הגדר מכסה")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                "לא כולל ניסיונות של אפליקציות חסומות (אלה לא נתונים אמיתיים)",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             if (!quotaSettings.isConfigured) {
                 Text(
-                    "לא הוגדרה מכסת נתונים — לחץ \"הגדר מכסה\" כדי לקבל התראות בהתקרבות לסוף החבילה.",
-                    style = MaterialTheme.typography.bodySmall
+                    "צריכה כוללת: לא הוגדרה מכסה",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
                 )
-                return@Column
+                TextButton(onClick = onEditClick, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text("הגדר מכסה", style = MaterialTheme.typography.labelMedium)
+                }
+                return@Row
             }
 
             val percent = ((usedBytes.toDouble() / quotaSettings.quotaBytes.toDouble()) * 100)
                 .toInt().coerceAtLeast(0)
             val overThreshold = percent >= quotaSettings.thresholdPercent
 
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "${formatBytes(usedBytes)} מתוך ${formatBytes(quotaSettings.quotaBytes)} · $percent%",
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            LinearProgressIndicator(
-                progress = { (percent / 100f).coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth(),
-                color = if (overThreshold) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                "סף התראה: ${quotaSettings.thresholdPercent}% · לאחר מכן התראה כל 10%",
-                style = MaterialTheme.typography.labelSmall
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            TextButton(onClick = onResetCycle) { Text("אפס מחזור (חבילה חדשה)") }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "${formatBytes(usedBytes)} / ${formatBytes(quotaSettings.quotaBytes)} · $percent%" +
+                        " · סף ${quotaSettings.thresholdPercent}%(+10%)",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                LinearProgressIndicator(
+                    progress = { (percent / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = if (overThreshold) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(onClick = onEditClick, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Text("ערוך", style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(onClick = onResetCycle, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Text("אפס", style = MaterialTheme.typography.labelMedium)
+            }
         }
     }
 }
