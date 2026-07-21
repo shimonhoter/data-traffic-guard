@@ -9,14 +9,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -206,11 +208,13 @@ fun DashboardScaffold(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
+    var activeOnly by remember { mutableStateOf(false) }
     var sortMode by remember { mutableStateOf(SortMode.TOTAL_DESC) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var categoryMenuExpanded by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
 
-    val displayedUsage = remember(usage, searchQuery, categoryFilter, sortMode) {
+    val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode) {
         usage
             .filter { app ->
                 when (categoryFilter) {
@@ -219,6 +223,7 @@ fun DashboardScaffold(
                     CategoryFilter.SYSTEM_APPS -> app.isSystemApp
                 }
             }
+            .filter { app -> !activeOnly || app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0 }
             .filter { app -> searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true) }
             .let { list ->
                 when (sortMode) {
@@ -233,7 +238,11 @@ fun DashboardScaffold(
     Scaffold(topBar = { TopAppBar(title = { Text("DataTrafficGuard") }) }) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
 
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -297,47 +306,40 @@ fun DashboardScaffold(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CategoryFilter.entries.forEach { filter ->
-                        FilterChip(
-                            selected = categoryFilter == filter,
-                            onClick = { categoryFilter = filter },
-                            label = { Text(filter.label, style = MaterialTheme.typography.labelSmall) }
-                        )
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CategoryFilterControl(
+                        selected = categoryFilter,
+                        expanded = categoryMenuExpanded,
+                        onExpandedChange = { categoryMenuExpanded = it },
+                        onSelect = { categoryFilter = it }
+                    )
+                    ActiveOnlyToggle(
+                        active = activeOnly,
+                        onToggle = { activeOnly = it }
+                    )
                 }
-                Box {
-                    IconButton(onClick = { sortMenuExpanded = true }) {
-                        Icon(Icons.Filled.Sort, contentDescription = "מיון")
-                    }
-                    DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
-                        SortMode.entries.forEach { mode ->
-                            DropdownMenuItem(
-                                text = { Text(mode.label) },
-                                onClick = { sortMode = mode; sortMenuExpanded = false }
-                            )
-                        }
-                    }
-                }
+                SortControl(
+                    selected = sortMode,
+                    expanded = sortMenuExpanded,
+                    onExpandedChange = { sortMenuExpanded = it },
+                    onSelect = { sortMode = it }
+                )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                "מיון: ${sortMode.label}  ·  ${displayedUsage.size} אפליקציות" +
-                    if (travelModeEnabled) "  ·  חסימה ידנית מושבתת בזמן מצב נסיעה" else "",
-                style = MaterialTheme.typography.labelSmall
-            )
             Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "${displayedUsage.size} אפליקציות" +
+                    (if (activeOnly) " · פעילות כרגע בלבד" else "") +
+                    (if (travelModeEnabled) " · חסימה ידנית מושבתת בזמן מצב נסיעה" else ""),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
 
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            LazyColumn {
                 items(displayedUsage, key = { it.uid }) { app ->
                     AppUsageRow(
                         app = app,
@@ -363,15 +365,85 @@ fun DashboardScaffold(
 }
 
 @Composable
+private fun CategoryFilterControl(
+    selected: CategoryFilter,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (CategoryFilter) -> Unit
+) {
+    Box {
+        TextButton(onClick = { onExpandedChange(true) }) {
+            Icon(Icons.Filled.FilterAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(selected.label, style = MaterialTheme.typography.labelMedium)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
+            CategoryFilter.entries.forEach { filter ->
+                DropdownMenuItem(
+                    text = { Text(filter.label) },
+                    onClick = { onSelect(filter); onExpandedChange(false) },
+                    leadingIcon = {
+                        if (filter == selected) Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
+    TextButton(onClick = { onToggle(!active) }) {
+        Icon(
+            imageVector = if (active) Icons.Filled.Bolt else Icons.Outlined.Bolt,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            "פעילות בלבד",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current
+        )
+    }
+}
+
+@Composable
+private fun SortControl(
+    selected: SortMode,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (SortMode) -> Unit
+) {
+    Box {
+        IconButton(onClick = { onExpandedChange(true) }) {
+            Icon(Icons.Filled.Sort, contentDescription = "מיון: ${selected.label}")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
+            SortMode.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text(mode.label) },
+                    onClick = { onSelect(mode); onExpandedChange(false) },
+                    leadingIcon = {
+                        if (mode == selected) Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun AppUsageRow(
     app: AppUsageSnapshot,
     isBlocked: Boolean,
     enabled: Boolean,
     onToggleBlocked: (Boolean) -> Unit
 ) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -379,20 +451,20 @@ private fun AppUsageRow(
                 Text(app.label, style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (app.unsupported) "לא זמין" else "היום: ${formatBytes(app.totalBytesToday)}",
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (!app.unsupported) {
                     Text(
                         "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("חסום", style = MaterialTheme.typography.labelSmall)
-                Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
-            }
+            Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
@@ -410,7 +482,11 @@ private fun QuotaCard(
     onEditClick: () -> Unit,
     onResetCycle: () -> Unit
 ) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
         Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
