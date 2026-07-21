@@ -105,10 +105,9 @@ class MainActivity : ComponentActivity() {
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
                             val enforced = vpnStatus.enforcedPackages
+                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }
                             value = withContext(Dispatchers.Default) {
-                                val deviceTotal = repository.totalDeviceBytesSince(quotaSettings.cycleStartMillis)
-                                val phantomBlocked = repository.bytesForPackagesSince(enforced, quotaSettings.cycleStartMillis)
-                                (deviceTotal - phantomBlocked).coerceAtLeast(0L)
+                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis)
                             }
                             delay(5000L)
                         }
@@ -350,6 +349,21 @@ fun DashboardScaffold(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextButton(
+                    onClick = { displayedUsage.forEach { onToggleBlocked(it.packageName, true) } },
+                    enabled = !travelModeEnabled
+                ) { Text("חסום הכל המוצג") }
+                TextButton(
+                    onClick = { displayedUsage.forEach { onToggleBlocked(it.packageName, false) } },
+                    enabled = !travelModeEnabled
+                ) { Text("שחרר הכל המוצג") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
 
             LazyColumn {
                 items(displayedUsage, key = { it.uid }) { app ->

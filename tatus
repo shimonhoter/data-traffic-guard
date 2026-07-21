@@ -1,0 +1,39 @@
+[1mdiff --git a/app/src/main/java/com/shimonhoter/datatrafficguard/MainActivity.kt b/app/src/main/java/com/shimonhoter/datatrafficguard/MainActivity.kt[m
+[1mindex 4584ac5..6786bc3 100644[m
+[1m--- a/app/src/main/java/com/shimonhoter/datatrafficguard/MainActivity.kt[m
+[1m+++ b/app/src/main/java/com/shimonhoter/datatrafficguard/MainActivity.kt[m
+[36m@@ -105,10 +105,9 @@[m [mclass MainActivity : ComponentActivity() {[m
+                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {[m
+                         while (true) {[m
+                             val enforced = vpnStatus.enforcedPackages[m
+[32m+[m[32m                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }[m
+                             value = withContext(Dispatchers.Default) {[m
+[31m-                                val deviceTotal = repository.totalDeviceBytesSince(quotaSettings.cycleStartMillis)[m
+[31m-                                val phantomBlocked = repository.bytesForPackagesSince(enforced, quotaSettings.cycleStartMillis)[m
+[31m-                                (deviceTotal - phantomBlocked).coerceAtLeast(0L)[m
+[32m+[m[32m                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis)[m
+                             }[m
+                             delay(5000L)[m
+                         }[m
+[36m@@ -351,6 +350,21 @@[m [mfun DashboardScaffold([m
+             )[m
+             Spacer(modifier = Modifier.height(4.dp))[m
+ [m
+[32m+[m[32m            Row([m
+[32m+[m[32m                modifier = Modifier.fillMaxWidth(),[m
+[32m+[m[32m                horizontalArrangement = Arrangement.spacedBy(8.dp)[m
+[32m+[m[32m            ) {[m
+[32m+[m[32m                TextButton([m
+[32m+[m[32m                    onClick = { displayedUsage.forEach { onToggleBlocked(it.packageName, true) } },[m
+[32m+[m[32m                    enabled = !travelModeEnabled[m
+[32m+[m[32m                ) { Text("חסום הכל המוצג") }[m
+[32m+[m[32m                TextButton([m
+[32m+[m[32m                    onClick = { displayedUsage.forEach { onToggleBlocked(it.packageName, false) } },[m
+[32m+[m[32m                    enabled = !travelModeEnabled[m
+[32m+[m[32m                ) { Text("שחרר הכל המוצג") }[m
+[32m+[m[32m            }[m
+[32m+[m[32m            Spacer(modifier = Modifier.height(8.dp))[m
+[32m+[m
+             LazyColumn {[m
+                 items(displayedUsage, key = { it.uid }) { app ->[m
+                     AppUsageRow([m
