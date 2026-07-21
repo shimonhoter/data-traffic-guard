@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
                             val enforced = vpnStatus.enforcedPackages
-                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }
+                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
                             value = withContext(Dispatchers.Default) {
                                 repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis)
                             }
