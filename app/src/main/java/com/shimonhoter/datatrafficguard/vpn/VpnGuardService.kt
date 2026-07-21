@@ -42,7 +42,7 @@ class VpnGuardService : VpnService() {
 
     companion object {
         const val EXTRA_BLOCKED_PACKAGES = "blocked_packages"
-        const val EXTRA_MODE = "mode" // "manual" or "travel"
+        const val EXTRA_MODE = "mode"
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
@@ -58,6 +58,7 @@ class VpnGuardService : VpnService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var travelJob: Job? = null
+    private val foregroundWatcher = ForegroundWatcher()
 
     override fun onCreate() {
         super.onCreate()
@@ -83,7 +84,7 @@ class VpnGuardService : VpnService() {
         travelJob = serviceScope.launch {
             while (isActive) {
                 try {
-                    val foreground = ForegroundWatcher.currentForegroundPackage(this@VpnGuardService)
+                    val foreground = foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
                     val whitelist = computeWhitelist()
                     val allNetworkPkgs = allNetworkPackages()
                     val allowed = whitelist + (foreground?.let { setOf(it) } ?: emptySet())
@@ -105,7 +106,6 @@ class VpnGuardService : VpnService() {
             .toSet()
     }
 
-    /** Apps that always keep network access in Travel Mode, so the phone stays usable. */
     private fun computeWhitelist(): Set<String> {
         val whitelist = mutableSetOf(packageName, "com.android.settings")
         try {
@@ -122,14 +122,13 @@ class VpnGuardService : VpnService() {
         return whitelist
     }
 
-    /** Core tunnel builder — shared by manual mode and every Travel Mode tick. */
     private fun rebuild(blockedPackages: Set<String>, mode: GuardMode, foregroundApp: String?) {
         closeTunnel()
 
         if (blockedPackages.isEmpty()) {
             Log.i(TAG, "No blocked packages — guard idle.")
             _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp)
-            if (mode == GuardMode.MANUAL) stopSelf() // travel mode keeps polling even with nothing to block
+            if (mode == GuardMode.MANUAL) stopSelf()
             return
         }
 
