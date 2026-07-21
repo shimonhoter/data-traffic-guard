@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import com.shimonhoter.datatrafficguard.MainActivity
 import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
+import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
 import kotlinx.coroutines.flow.first
 
 private const val QUOTA_CHANNEL_ID = "quota_alert_channel"
@@ -27,7 +28,10 @@ object QuotaChecker {
         if (!settings.isConfigured) return
 
         val repository = DataUsageRepository(context)
-        val usedBytes = repository.totalDeviceBytesSince(settings.cycleStartMillis)
+        val deviceTotal = repository.totalDeviceBytesSince(settings.cycleStartMillis)
+        val enforcedPackages = VpnGuardService.status.value.enforcedPackages
+        val phantomBlocked = repository.bytesForPackagesSince(enforcedPackages, settings.cycleStartMillis)
+        val usedBytes = (deviceTotal - phantomBlocked).coerceAtLeast(0L)
         val percent = ((usedBytes.toDouble() / settings.quotaBytes.toDouble()) * 100).toInt()
 
         if (percent < settings.thresholdPercent) return

@@ -104,8 +104,11 @@ class MainActivity : ComponentActivity() {
 
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
+                            val enforced = vpnStatus.enforcedPackages
                             value = withContext(Dispatchers.Default) {
-                                repository.totalDeviceBytesSince(quotaSettings.cycleStartMillis)
+                                val deviceTotal = repository.totalDeviceBytesSince(quotaSettings.cycleStartMillis)
+                                val phantomBlocked = repository.bytesForPackagesSince(enforced, quotaSettings.cycleStartMillis)
+                                (deviceTotal - phantomBlocked).coerceAtLeast(0L)
                             }
                             delay(5000L)
                         }
@@ -477,9 +480,10 @@ private fun AppUsageRow(
                     if (isBlocked && (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0)) {
                         val context = LocalContext.current
                         Text(
-                            "חסום, אך חיבור שכבר היה פתוח ממשיך לזרום עד שיסתיים מעצמו",
+                            "חסום — הקצב המוצג משויך לרוב לניסיונות שנחסמו (לא נתונים אמיתיים);" +
+                                " לעיתים נדירות זה חיבור קודם שעדיין פעיל",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         TextButton(
                             onClick = {
@@ -490,7 +494,7 @@ private fun AppUsageRow(
                                 )
                             },
                             contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
-                        ) { Text("עצור עכשיו (Force Stop)", style = MaterialTheme.typography.labelSmall) }
+                        ) { Text("עצור בכל זאת (Force Stop)", style = MaterialTheme.typography.labelSmall) }
                     }
                 }
             }
@@ -530,6 +534,13 @@ private fun QuotaCard(
                     Text(if (quotaSettings.isConfigured) "ערוך" else "הגדר מכסה")
                 }
             }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "לא כולל ניסיונות של אפליקציות חסומות (אלה לא נתונים אמיתיים)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             if (!quotaSettings.isConfigured) {
                 Text(

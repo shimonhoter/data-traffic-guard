@@ -94,6 +94,25 @@ class DataUsageRepository(private val context: Context) {
         return total
     }
 
+    /**
+     * Sum of bytes attributed to specific packages over [startMillis, now]. Used to back the
+     * "blocked apps" portion out of the device-wide total: when our sinkhole VPN is active,
+     * Android's OS-level traffic accounting re-credits bytes an app merely *wrote into the
+     * tunnel* onto mobile/WiFi for per-app reporting — even when nothing ever actually left
+     * the device (confirmed: this grows in airplane mode with zero networks). Device-wide
+     * totals inherit that same phantom credit, so we subtract it back out.
+     */
+    fun bytesForPackagesSince(packageNames: Set<String>, startMillis: Long): Long {
+        if (packageNames.isEmpty()) return 0L
+        val now = System.currentTimeMillis()
+        if (startMillis <= 0L || startMillis >= now) return 0L
+        val uidByPackage = try { networkApps().associate { it.packageName to it.uid } } catch (e: Exception) { return 0L }
+        val uids = packageNames.mapNotNull { uidByPackage[it] }.toSet()
+        if (uids.isEmpty()) return 0L
+        val totals = queryAllUidBytes(startMillis, now)
+        return uids.sumOf { uid -> (totals[uid]?.first ?: 0L) + (totals[uid]?.second ?: 0L) }
+    }
+
     private fun startOfToday(): Long {
         val cal = Calendar.getInstance()
         cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0)
