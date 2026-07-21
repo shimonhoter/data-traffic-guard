@@ -154,6 +154,11 @@ class VpnGuardService : VpnService() {
             .setSession("DataTrafficGuard")
             .addAddress("10.0.0.2", 32)
             .addRoute("0.0.0.0", 0)
+            // Without an IPv6 route too, blocked apps can simply use IPv6 (very common on
+            // Israeli carriers/WiFi) to reach the internet completely outside this tunnel —
+            // that's exactly the kind of small, steady "leak" that shows up despite the block.
+            .addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 128)
+            .addRoute("::", 0)
             .addDnsServer("8.8.8.8")
 
         val actuallyAdded = mutableSetOf<String>()
