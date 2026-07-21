@@ -27,6 +27,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class GuardMode { MANUAL, TRAVEL }
 
@@ -59,6 +60,9 @@ class VpnGuardService : VpnService() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var travelJob: Job? = null
     private val foregroundWatcher = ForegroundWatcher()
+    /** Bumped on every onStartCommand so a stale, still-finishing travel tick can never
+     *  clobber a newer command (e.g. re-establishing the tunnel right after it was told to stop). */
+    private val currentGeneration = AtomicInteger(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -67,29 +71,39 @@ class VpnGuardService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val mode = if (intent?.getStringExtra(EXTRA_MODE) == "travel") GuardMode.TRAVEL else GuardMode.MANUAL
+        val generation = currentGeneration.incrementAndGet()
 
         travelJob?.cancel()
         travelJob = null
 
         if (mode == GuardMode.TRAVEL) {
-            startTravelMode()
+            startTravelMode(generation)
         } else {
             val blocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
-            rebuild(blocked, GuardMode.MANUAL, null)
+            rebuild(blocked, GuardMode.MANUAL, null, generation)
         }
         return START_STICKY
     }
 
-    private fun startTravelMode() {
+    private fun startTravelMode(generation: Int) {
         travelJob = serviceScope.launch {
-            while (isActive) {
+            var lastAllowed: Set<String>? = null
+            while (isActive && generation == currentGeneration.get()) {
                 try {
                     val foreground = foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
                     val whitelist = computeWhitelist()
                     val allNetworkPkgs = allNetworkPackages()
                     val allowed = whitelist + (foreground?.let { setOf(it) } ?: emptySet())
-                    val blocked = allNetworkPkgs - allowed
-                    rebuild(blocked, GuardMode.TRAVEL, foreground)
+
+                    if (allowed != lastAllowed) {
+                        // Allow-list actually changed — worth tearing down and re-establishing the tunnel.
+                        val blocked = allNetworkPkgs - allowed
+                        rebuild(blocked, GuardMode.TRAVEL, foreground, generation)
+                        lastAllowed = allowed
+                    } else if (generation == currentGeneration.get()) {
+                        // Same foreground app as last tick — just refresh the label, don't touch the tunnel.
+                        _status.value = _status.value.copy(currentForegroundApp = foreground)
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Travel mode tick failed", e)
                 }
@@ -122,7 +136,11 @@ class VpnGuardService : VpnService() {
         return whitelist
     }
 
-    private fun rebuild(blockedPackages: Set<String>, mode: GuardMode, foregroundApp: String?) {
+    private fun rebuild(blockedPackages: Set<String>, mode: GuardMode, foregroundApp: String?, generation: Int) {
+        if (generation != currentGeneration.get()) {
+            Log.d(TAG, "Dropping stale rebuild (generation $generation, current ${currentGeneration.get()})")
+            return
+        }
         closeTunnel()
 
         if (blockedPackages.isEmpty()) {
@@ -209,6 +227,7 @@ class VpnGuardService : VpnService() {
     }
 
     override fun onDestroy() {
+        currentGeneration.incrementAndGet()
         travelJob?.cancel()
         serviceScope.cancel()
         closeTunnel()
@@ -217,6 +236,7 @@ class VpnGuardService : VpnService() {
     }
 
     override fun onRevoke() {
+        currentGeneration.incrementAndGet()
         travelJob?.cancel()
         closeTunnel()
         _status.value = VpnStatus(tunnelActive = false, lastError = "הרשאת VPN בוטלה על ידי המשתמש")
