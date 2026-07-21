@@ -9,17 +9,32 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.provider.Telephony
+import android.telecom.TelecomManager
 import android.util.Log
 import com.shimonhoter.datatrafficguard.MainActivity
+import com.shimonhoter.datatrafficguard.monitor.ForegroundWatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.IOException
 
+enum class GuardMode { MANUAL, TRAVEL }
+
 data class VpnStatus(
     val tunnelActive: Boolean,
-    val enforcedPackages: Set<String>,
+    val mode: GuardMode = GuardMode.MANUAL,
+    val enforcedPackages: Set<String> = emptySet(),
+    val currentForegroundApp: String? = null,
     val lastError: String? = null
 )
 
@@ -27,11 +42,13 @@ class VpnGuardService : VpnService() {
 
     companion object {
         const val EXTRA_BLOCKED_PACKAGES = "blocked_packages"
+        const val EXTRA_MODE = "mode" // "manual" or "travel"
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
+        private const val TRAVEL_POLL_MS = 1500L
 
-        private val _status = MutableStateFlow(VpnStatus(tunnelActive = false, enforcedPackages = emptySet()))
+        private val _status = MutableStateFlow(VpnStatus(tunnelActive = false))
         val status: StateFlow<VpnStatus> = _status.asStateFlow()
     }
 
@@ -39,24 +56,80 @@ class VpnGuardService : VpnService() {
     private var drainThread: Thread? = null
     @Volatile private var running = false
 
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var travelJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val blocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
-        rebuild(blocked)
+        val mode = if (intent?.getStringExtra(EXTRA_MODE) == "travel") GuardMode.TRAVEL else GuardMode.MANUAL
+
+        travelJob?.cancel()
+        travelJob = null
+
+        if (mode == GuardMode.TRAVEL) {
+            startTravelMode()
+        } else {
+            val blocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
+            rebuild(blocked, GuardMode.MANUAL, null)
+        }
         return START_STICKY
     }
 
-    fun rebuild(blockedPackages: Set<String>) {
+    private fun startTravelMode() {
+        travelJob = serviceScope.launch {
+            while (isActive) {
+                try {
+                    val foreground = ForegroundWatcher.currentForegroundPackage(this@VpnGuardService)
+                    val whitelist = computeWhitelist()
+                    val allNetworkPkgs = allNetworkPackages()
+                    val allowed = whitelist + (foreground?.let { setOf(it) } ?: emptySet())
+                    val blocked = allNetworkPkgs - allowed
+                    rebuild(blocked, GuardMode.TRAVEL, foreground)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Travel mode tick failed", e)
+                }
+                delay(TRAVEL_POLL_MS)
+            }
+        }
+    }
+
+    private fun allNetworkPackages(): Set<String> {
+        @Suppress("DEPRECATION") val apps = packageManager.getInstalledApplications(0)
+        return apps.asSequence()
+            .filter { it.uid >= android.os.Process.FIRST_APPLICATION_UID }
+            .map { it.packageName }
+            .toSet()
+    }
+
+    /** Apps that always keep network access in Travel Mode, so the phone stays usable. */
+    private fun computeWhitelist(): Set<String> {
+        val whitelist = mutableSetOf(packageName, "com.android.settings")
+        try {
+            val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            packageManager.resolveActivity(launcherIntent, PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName?.let { whitelist += it }
+        } catch (e: Exception) { }
+        try {
+            (getSystemService(TELECOM_SERVICE) as? TelecomManager)?.defaultDialerPackage?.let { whitelist += it }
+        } catch (e: Exception) { }
+        try {
+            Telephony.Sms.getDefaultSmsPackage(this)?.let { whitelist += it }
+        } catch (e: Exception) { }
+        return whitelist
+    }
+
+    /** Core tunnel builder — shared by manual mode and every Travel Mode tick. */
+    private fun rebuild(blockedPackages: Set<String>, mode: GuardMode, foregroundApp: String?) {
         closeTunnel()
 
         if (blockedPackages.isEmpty()) {
-            Log.i(TAG, "No blocked packages — guard idle, stopping self.")
-            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet())
-            stopSelf()
+            Log.i(TAG, "No blocked packages — guard idle.")
+            _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp)
+            if (mode == GuardMode.MANUAL) stopSelf() // travel mode keeps polling even with nothing to block
             return
         }
 
@@ -73,11 +146,11 @@ class VpnGuardService : VpnService() {
                 builder.addAllowedApplication(pkg)
                 actuallyAdded += pkg
             } catch (e: PackageManager.NameNotFoundException) {
-                Log.w(TAG, "Package not found, skipping: $pkg")
+                // uninstalled between listing and building — skip
             }
         }
         if (actuallyAdded.isEmpty()) {
-            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "אף חבילה לא נמצאה")
+            _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp, lastError = "אין אפליקציות לחסימה")
             return
         }
 
@@ -85,17 +158,17 @@ class VpnGuardService : VpnService() {
             builder.establish()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish tunnel", e)
-            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = e.message)
+            _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp, lastError = e.message)
             null
         }
 
         if (tunnel == null) {
-            _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "establish() החזיר null")
+            _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp, lastError = "establish() החזיר null")
             return
         }
 
         tunnel?.let { startDrainThread(it) }
-        _status.value = VpnStatus(tunnelActive = true, enforcedPackages = actuallyAdded)
+        _status.value = VpnStatus(tunnelActive = true, mode = mode, enforcedPackages = actuallyAdded, currentForegroundApp = foregroundApp)
     }
 
     private fun startDrainThread(fd: ParcelFileDescriptor) {
@@ -137,14 +210,17 @@ class VpnGuardService : VpnService() {
     }
 
     override fun onDestroy() {
+        travelJob?.cancel()
+        serviceScope.cancel()
         closeTunnel()
-        _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet())
+        _status.value = VpnStatus(tunnelActive = false)
         super.onDestroy()
     }
 
     override fun onRevoke() {
+        travelJob?.cancel()
         closeTunnel()
-        _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet(), lastError = "הרשאת VPN בוטלה על ידי המשתמש")
+        _status.value = VpnStatus(tunnelActive = false, lastError = "הרשאת VPN בוטלה על ידי המשתמש")
         super.onRevoke()
     }
 }

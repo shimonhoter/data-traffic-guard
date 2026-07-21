@@ -26,6 +26,7 @@ import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.monitor.hasUsageAccess
 import com.shimonhoter.datatrafficguard.policy.PolicyEngine
 import com.shimonhoter.datatrafficguard.ui.theme.DataTrafficGuardTheme
+import com.shimonhoter.datatrafficguard.vpn.GuardMode
 import com.shimonhoter.datatrafficguard.vpn.VpnGuardService
 import com.shimonhoter.datatrafficguard.vpn.VpnStatus
 import kotlinx.coroutines.launch
@@ -47,10 +48,15 @@ class MainActivity : ComponentActivity() {
 
     private val usageAccessGranted = mutableStateOf(false)
     private var pendingBlocked: Set<String> = emptySet()
+    private var pendingTravelMode = false
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { result -> if (result.resultCode == RESULT_OK) startGuardService(pendingBlocked) }
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            if (pendingTravelMode) startTravelModeService() else startGuardService(pendingBlocked)
+        }
+    }
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -72,16 +78,23 @@ class MainActivity : ComponentActivity() {
                 if (granted) {
                     val usage by usageFlow.collectAsState(initial = emptyList())
                     val blockedPackages by policyEngine.blockedPackages.collectAsState(initial = emptySet())
+                    val travelModeEnabled by policyEngine.travelModeEnabled.collectAsState(initial = false)
                     val vpnStatus by VpnGuardService.status.collectAsState()
 
-                    LaunchedEffect(blockedPackages) { applyBlockedPackages(blockedPackages) }
+                    LaunchedEffect(travelModeEnabled, blockedPackages) {
+                        applyPolicy(travelModeEnabled, blockedPackages)
+                    }
 
                     DashboardScaffold(
                         usage = usage,
                         blockedPackages = blockedPackages,
+                        travelModeEnabled = travelModeEnabled,
                         vpnStatus = vpnStatus,
                         onToggleBlocked = { pkg, blocked ->
                             lifecycleScope.launch { policyEngine.toggleBlock(pkg, blocked) }
+                        },
+                        onTravelModeToggled = { enabled ->
+                            lifecycleScope.launch { policyEngine.setTravelMode(enabled) }
                         }
                     )
                 } else {
@@ -98,20 +111,24 @@ class MainActivity : ComponentActivity() {
         usageAccessGranted.value = hasUsageAccess(this)
     }
 
-    /**
-     * Always goes through ONE path (start the service, even with an empty set) —
-     * the service itself decides whether to establish a tunnel or stopSelf().
-     * Previously a separate stopService() call for the empty case could race
-     * with startForegroundService(), leaving the service's in-memory status out
-     * of sync with the actual (empty) policy.
-     */
-    private fun applyBlockedPackages(blocked: Set<String>) {
+    private fun applyPolicy(travelModeEnabled: Boolean, blocked: Set<String>) {
+        if (travelModeEnabled) {
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                pendingTravelMode = true
+                vpnPermissionLauncher.launch(intent)
+            } else {
+                startTravelModeService()
+            }
+            return
+        }
         if (blocked.isEmpty()) {
             startGuardService(emptySet())
             return
         }
         val intent = VpnService.prepare(this)
         if (intent != null) {
+            pendingTravelMode = false
             pendingBlocked = blocked
             vpnPermissionLauncher.launch(intent)
         } else {
@@ -119,8 +136,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startTravelModeService() {
+        val serviceIntent = Intent(this, VpnGuardService::class.java).apply {
+            putExtra(VpnGuardService.EXTRA_MODE, "travel")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
+        else startService(serviceIntent)
+    }
+
     private fun startGuardService(blocked: Set<String>) {
         val serviceIntent = Intent(this, VpnGuardService::class.java).apply {
+            putExtra(VpnGuardService.EXTRA_MODE, "manual")
             putStringArrayListExtra(VpnGuardService.EXTRA_BLOCKED_PACKAGES, ArrayList(blocked))
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
@@ -151,8 +177,10 @@ fun UsageAccessRequestScreen(onOpenSettings: () -> Unit) {
 fun DashboardScaffold(
     usage: List<AppUsageSnapshot> = emptyList(),
     blockedPackages: Set<String> = emptySet(),
-    vpnStatus: VpnStatus = VpnStatus(tunnelActive = false, enforcedPackages = emptySet()),
-    onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> }
+    travelModeEnabled: Boolean = false,
+    vpnStatus: VpnStatus = VpnStatus(tunnelActive = false),
+    onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> },
+    onTravelModeToggled: (Boolean) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
@@ -184,17 +212,37 @@ fun DashboardScaffold(
 
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                    Text("חסימות פעילות", style = MaterialTheme.typography.titleMedium)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("מצב נסיעה", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "רשת זמינה רק לאפליקציה שבחזית",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Switch(checked = travelModeEnabled, onCheckedChange = onTravelModeToggled)
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    if (!travelModeEnabled) {
+                        Text(
+                            "${blockedPackages.size} אפליקציות מסומנות לחסימה ידנית",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "${blockedPackages.size} אפליקציות מסומנות לחסימה",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = if (vpnStatus.tunnelActive)
-                            "מנהרה פעילה · ${vpnStatus.enforcedPackages.size} אפליקציות נאכפות בפועל"
-                        else
-                            "מנהרה לא פעילה" + (vpnStatus.lastError?.let { " · שגיאה: $it" } ?: ""),
+                        text = when {
+                            vpnStatus.tunnelActive && vpnStatus.mode == GuardMode.TRAVEL ->
+                                "פעיל · מותר: ${vpnStatus.currentForegroundApp ?: "לא ידוע"} · ${vpnStatus.enforcedPackages.size} חסומות"
+                            vpnStatus.tunnelActive ->
+                                "מנהרה פעילה · ${vpnStatus.enforcedPackages.size} אפליקציות נאכפות בפועל"
+                            else ->
+                                "מנהרה לא פעילה" + (vpnStatus.lastError?.let { " · שגיאה: $it" } ?: "")
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (vpnStatus.tunnelActive) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.error
@@ -246,7 +294,8 @@ fun DashboardScaffold(
 
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                "מיון: ${sortMode.label}  ·  ${displayedUsage.size} אפליקציות",
+                "מיון: ${sortMode.label}  ·  ${displayedUsage.size} אפליקציות" +
+                    if (travelModeEnabled) "  ·  חסימה ידנית מושבתת בזמן מצב נסיעה" else "",
                 style = MaterialTheme.typography.labelSmall
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -256,6 +305,7 @@ fun DashboardScaffold(
                     AppUsageRow(
                         app = app,
                         isBlocked = blockedPackages.contains(app.packageName),
+                        enabled = !travelModeEnabled,
                         onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
                     )
                 }
@@ -268,6 +318,7 @@ fun DashboardScaffold(
 private fun AppUsageRow(
     app: AppUsageSnapshot,
     isBlocked: Boolean,
+    enabled: Boolean,
     onToggleBlocked: (Boolean) -> Unit
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
@@ -291,7 +342,7 @@ private fun AppUsageRow(
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("חסום", style = MaterialTheme.typography.labelSmall)
-                Switch(checked = isBlocked, onCheckedChange = onToggleBlocked)
+                Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
             }
         }
     }
