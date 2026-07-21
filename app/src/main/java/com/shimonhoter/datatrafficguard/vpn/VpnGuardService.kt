@@ -54,8 +54,9 @@ class VpnGuardService : VpnService() {
         closeTunnel()
 
         if (blockedPackages.isEmpty()) {
-            Log.i(TAG, "No blocked packages — guard idle, network fully untouched.")
+            Log.i(TAG, "No blocked packages — guard idle, stopping self.")
             _status.value = VpnStatus(tunnelActive = false, enforcedPackages = emptySet())
+            stopSelf()
             return
         }
 

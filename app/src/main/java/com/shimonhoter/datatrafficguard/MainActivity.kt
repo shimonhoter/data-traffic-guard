@@ -62,9 +62,6 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        // created once here (NOT inside setContent) so the Flow instances stay stable
-        // across recompositions — recreating them every recomposition was the bug
-        // that made the usage list refresh once and then stop.
         val repository = DataUsageRepository(applicationContext)
         val policyEngine = PolicyEngine(applicationContext)
         val usageFlow = repository.observeUsage()
@@ -101,9 +98,16 @@ class MainActivity : ComponentActivity() {
         usageAccessGranted.value = hasUsageAccess(this)
     }
 
+    /**
+     * Always goes through ONE path (start the service, even with an empty set) —
+     * the service itself decides whether to establish a tunnel or stopSelf().
+     * Previously a separate stopService() call for the empty case could race
+     * with startForegroundService(), leaving the service's in-memory status out
+     * of sync with the actual (empty) policy.
+     */
     private fun applyBlockedPackages(blocked: Set<String>) {
         if (blocked.isEmpty()) {
-            stopGuardService()
+            startGuardService(emptySet())
             return
         }
         val intent = VpnService.prepare(this)
@@ -121,10 +125,6 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
         else startService(serviceIntent)
-    }
-
-    private fun stopGuardService() {
-        stopService(Intent(this, VpnGuardService::class.java))
     }
 }
 
