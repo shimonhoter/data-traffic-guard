@@ -4,11 +4,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.util.Log
@@ -44,6 +48,8 @@ class VpnGuardService : VpnService() {
     companion object {
         const val EXTRA_BLOCKED_PACKAGES = "blocked_packages"
         const val EXTRA_MODE = "mode"
+        const val EXTRA_SCREEN_OFF_ENABLED = "screen_off_enabled"
+        const val EXTRA_SCREEN_OFF_ALLOWED = "screen_off_allowed"
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
@@ -64,14 +70,49 @@ class VpnGuardService : VpnService() {
      *  clobber a newer command (e.g. re-establishing the tunnel right after it was told to stop). */
     private val currentGeneration = AtomicInteger(0)
 
+    // Latest known config, kept so the screen receiver can recompute enforcement
+    // for Manual mode without needing a fresh Intent from the app.
+    private var currentMode: GuardMode = GuardMode.MANUAL
+    private var currentManualBlocked: Set<String> = emptySet()
+    private var screenOffAllowlistEnabled: Boolean = false
+    private var screenOffAllowedPackages: Set<String> = emptySet()
+    private var screenReceiverRegistered = false
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val generation = currentGeneration.get()
+            if (currentMode == GuardMode.MANUAL) {
+                serviceScope.launch {
+                    rebuild(effectiveManualBlocked(), GuardMode.MANUAL, null, generation)
+                }
+            }
+            // Travel mode re-evaluates the screen state on its own poll loop (TRAVEL_POLL_MS),
+            // so no extra action is needed there.
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(screenReceiver, filter)
+        }
+        screenReceiverRegistered = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val mode = if (intent?.getStringExtra(EXTRA_MODE) == "travel") GuardMode.TRAVEL else GuardMode.MANUAL
         val generation = currentGeneration.incrementAndGet()
+
+        currentMode = mode
+        screenOffAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_OFF_ENABLED, false) ?: false
+        screenOffAllowedPackages = intent?.getStringArrayListExtra(EXTRA_SCREEN_OFF_ALLOWED)?.toSet() ?: emptySet()
 
         travelJob?.cancel()
         travelJob = null
@@ -79,10 +120,25 @@ class VpnGuardService : VpnService() {
         if (mode == GuardMode.TRAVEL) {
             startTravelMode(generation)
         } else {
-            val blocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
-            rebuild(blocked, GuardMode.MANUAL, null, generation)
+            currentManualBlocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
+            rebuild(effectiveManualBlocked(), GuardMode.MANUAL, null, generation)
         }
         return START_STICKY
+    }
+
+    private fun isScreenOff(): Boolean {
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        return pm != null && !pm.isInteractive
+    }
+
+    /** Manual mode's blocked set, widened to "everything but the screen-off allowlist"
+     *  whenever the screen is off and that restriction is turned on. */
+    private fun effectiveManualBlocked(): Set<String> {
+        if (screenOffAllowlistEnabled && isScreenOff()) {
+            val allowed = computeWhitelist() + screenOffAllowedPackages
+            return allNetworkPackages() - allowed
+        }
+        return currentManualBlocked
     }
 
     private fun startTravelMode(generation: Int) {
@@ -90,10 +146,15 @@ class VpnGuardService : VpnService() {
             var lastAllowed: Set<String>? = null
             while (isActive && generation == currentGeneration.get()) {
                 try {
-                    val foreground = foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
+                    val screenOff = isScreenOff()
                     val whitelist = computeWhitelist()
                     val allNetworkPkgs = allNetworkPackages()
-                    val allowed = whitelist + (foreground?.let { setOf(it) } ?: emptySet())
+                    val foreground = if (screenOff) null else foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
+                    val allowed = if (screenOffAllowlistEnabled && screenOff) {
+                        whitelist + screenOffAllowedPackages
+                    } else {
+                        whitelist + (foreground?.let { setOf(it) } ?: emptySet())
+                    }
 
                     if (allowed != lastAllowed) {
                         // Allow-list actually changed — worth tearing down and re-establishing the tunnel.
@@ -146,7 +207,9 @@ class VpnGuardService : VpnService() {
         if (blockedPackages.isEmpty()) {
             Log.i(TAG, "No blocked packages — guard idle.")
             _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp)
-            if (mode == GuardMode.MANUAL) stopSelf()
+            // Keep the service alive in Manual mode when the screen-off allowlist is on:
+            // there's nothing to block right now, but the screen turning off may change that.
+            if (mode == GuardMode.MANUAL && !screenOffAllowlistEnabled) stopSelf()
             return
         }
 
@@ -231,11 +294,19 @@ class VpnGuardService : VpnService() {
             .build()
     }
 
+    private fun unregisterScreenReceiverSafely() {
+        if (screenReceiverRegistered) {
+            try { unregisterReceiver(screenReceiver) } catch (e: IllegalArgumentException) { }
+            screenReceiverRegistered = false
+        }
+    }
+
     override fun onDestroy() {
         currentGeneration.incrementAndGet()
         travelJob?.cancel()
         serviceScope.cancel()
         closeTunnel()
+        unregisterScreenReceiverSafely()
         _status.value = VpnStatus(tunnelActive = false)
         super.onDestroy()
     }
@@ -244,6 +315,7 @@ class VpnGuardService : VpnService() {
         currentGeneration.incrementAndGet()
         travelJob?.cancel()
         closeTunnel()
+        unregisterScreenReceiverSafely()
         _status.value = VpnStatus(tunnelActive = false, lastError = "הרשאת VPN בוטלה על ידי המשתמש")
         super.onRevoke()
     }

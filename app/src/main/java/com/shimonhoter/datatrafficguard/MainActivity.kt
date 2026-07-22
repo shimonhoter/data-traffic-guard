@@ -63,12 +63,18 @@ class MainActivity : ComponentActivity() {
     private val usageAccessGranted = mutableStateOf(false)
     private var pendingBlocked: Set<String> = emptySet()
     private var pendingTravelMode = false
+    private var pendingScreenOffEnabled = false
+    private var pendingScreenOffAllowed: Set<String> = emptySet()
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            if (pendingTravelMode) startTravelModeService() else startGuardService(pendingBlocked)
+            if (pendingTravelMode) {
+                startTravelModeService(pendingScreenOffEnabled, pendingScreenOffAllowed)
+            } else {
+                startGuardService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed)
+            }
         }
     }
 
@@ -101,6 +107,8 @@ class MainActivity : ComponentActivity() {
                     val travelModeEnabled by policyEngine.travelModeEnabled.collectAsState(initial = false)
                     val vpnStatus by VpnGuardService.status.collectAsState()
                     val quotaSettings by quotaEngine.settings.collectAsState(initial = QuotaSettings())
+                    val screenOffAllowlistEnabled by policyEngine.screenOffAllowlistEnabled.collectAsState(initial = false)
+                    val screenOffAllowedPackages by policyEngine.screenOffAllowedPackages.collectAsState(initial = emptySet())
 
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
@@ -113,8 +121,8 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    LaunchedEffect(travelModeEnabled, blockedPackages) {
-                        applyPolicy(travelModeEnabled, blockedPackages)
+                    LaunchedEffect(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages) {
+                        applyPolicy(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages)
                     }
 
                     DashboardScaffold(
@@ -124,6 +132,8 @@ class MainActivity : ComponentActivity() {
                         vpnStatus = vpnStatus,
                         quotaSettings = quotaSettings,
                         totalUsedBytes = totalUsedBytes,
+                        screenOffAllowlistEnabled = screenOffAllowlistEnabled,
+                        screenOffAllowedPackages = screenOffAllowedPackages,
                         onToggleBlocked = { pkg, blocked ->
                             lifecycleScope.launch { policyEngine.toggleBlock(pkg, blocked) }
                         },
@@ -135,6 +145,12 @@ class MainActivity : ComponentActivity() {
                         },
                         onResetCycle = {
                             lifecycleScope.launch { quotaEngine.resetCycle() }
+                        },
+                        onScreenOffAllowlistToggled = { enabled ->
+                            lifecycleScope.launch { policyEngine.setScreenOffAllowlistEnabled(enabled) }
+                        },
+                        onToggleScreenOffAllowed = { pkg, allowed ->
+                            lifecycleScope.launch { policyEngine.setScreenOffAllowed(pkg, allowed) }
                         }
                     )
                 } else {
@@ -151,37 +167,58 @@ class MainActivity : ComponentActivity() {
         usageAccessGranted.value = hasUsageAccess(this)
     }
 
-    private fun applyPolicy(travelModeEnabled: Boolean, blocked: Set<String>) {
+    private fun applyPolicy(
+        travelModeEnabled: Boolean,
+        blocked: Set<String>,
+        screenOffAllowlistEnabled: Boolean,
+        screenOffAllowedPackages: Set<String>
+    ) {
         if (travelModeEnabled) {
             val intent = VpnService.prepare(this)
             if (intent != null) {
                 pendingTravelMode = true
+                pendingScreenOffEnabled = screenOffAllowlistEnabled
+                pendingScreenOffAllowed = screenOffAllowedPackages
                 vpnPermissionLauncher.launch(intent)
             } else {
-                startTravelModeService()
+                startTravelModeService(screenOffAllowlistEnabled, screenOffAllowedPackages)
             }
             return
         }
-        if (blocked.isEmpty()) {
-            startGuardService(emptySet())
+        if (blocked.isEmpty() && !screenOffAllowlistEnabled) {
+            startGuardService(emptySet(), false, emptySet())
             return
         }
         val intent = VpnService.prepare(this)
         if (intent != null) {
             pendingTravelMode = false
             pendingBlocked = blocked
+            pendingScreenOffEnabled = screenOffAllowlistEnabled
+            pendingScreenOffAllowed = screenOffAllowedPackages
             vpnPermissionLauncher.launch(intent)
         } else {
-            startGuardService(blocked)
+            startGuardService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages)
         }
     }
 
-    private fun startTravelModeService() {
-        VpnServiceLauncher.launch(this, travelModeEnabled = true, blocked = emptySet())
+    private fun startTravelModeService(screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
+        VpnServiceLauncher.launch(
+            this,
+            travelModeEnabled = true,
+            blocked = emptySet(),
+            screenOffAllowlistEnabled = screenOffEnabled,
+            screenOffAllowedPackages = screenOffAllowed
+        )
     }
 
-    private fun startGuardService(blocked: Set<String>) {
-        VpnServiceLauncher.launch(this, travelModeEnabled = false, blocked = blocked)
+    private fun startGuardService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
+        VpnServiceLauncher.launch(
+            this,
+            travelModeEnabled = false,
+            blocked = blocked,
+            screenOffAllowlistEnabled = screenOffEnabled,
+            screenOffAllowedPackages = screenOffAllowed
+        )
     }
 }
 
@@ -212,10 +249,14 @@ fun DashboardScaffold(
     vpnStatus: VpnStatus = VpnStatus(tunnelActive = false),
     quotaSettings: QuotaSettings = QuotaSettings(),
     totalUsedBytes: Long = 0L,
+    screenOffAllowlistEnabled: Boolean = false,
+    screenOffAllowedPackages: Set<String> = emptySet(),
     onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> },
     onTravelModeToggled: (Boolean) -> Unit = {},
     onSetQuota: (Long, Int) -> Unit = { _, _ -> },
-    onResetCycle: () -> Unit = {}
+    onResetCycle: () -> Unit = {},
+    onScreenOffAllowlistToggled: (Boolean) -> Unit = {},
+    onToggleScreenOffAllowed: (String, Boolean) -> Unit = { _, _ -> }
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
@@ -224,6 +265,7 @@ fun DashboardScaffold(
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var categoryMenuExpanded by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
+    var showScreenOffDialog by remember { mutableStateOf(false) }
 
     val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode) {
         usage
@@ -290,6 +332,43 @@ fun DashboardScaffold(
                         color = if (vpnStatus.tunnelActive) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.error
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("הגבלה כשהמסך כבוי", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "רק אפליקציות נבחרות ישמרו על גישה לרשת כשהמסך כבוי — פועל גם במצב נסיעה וגם במצב ידני",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Switch(checked = screenOffAllowlistEnabled, onCheckedChange = onScreenOffAllowlistToggled)
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "${'$'}{screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = { showScreenOffDialog = true }) { Text("ערוך רשימה") }
+                    }
                 }
             }
 
@@ -386,6 +465,15 @@ fun DashboardScaffold(
                 onSetQuota(quotaBytes, thresholdPercent)
                 showQuotaDialog = false
             }
+        )
+    }
+
+    if (showScreenOffDialog) {
+        ScreenOffAllowlistDialog(
+            apps = usage,
+            allowedPackages = screenOffAllowedPackages,
+            onDismiss = { showScreenOffDialog = false },
+            onToggle = onToggleScreenOffAllowed
         )
     }
 }
@@ -633,6 +721,42 @@ private fun QuotaEditDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("ביטול") }
+        }
+    )
+}
+
+
+@Composable
+private fun ScreenOffAllowlistDialog(
+    apps: List<AppUsageSnapshot>,
+    allowedPackages: Set<String>,
+    onDismiss: () -> Unit,
+    onToggle: (String, Boolean) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("אפליקציות מורשות כשהמסך כבוי") },
+        text = {
+            LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                items(apps.sortedBy { it.label.lowercase() }, key = { it.packageName }) { app ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(app.label, style = MaterialTheme.typography.bodyMedium)
+                        Checkbox(
+                            checked = allowedPackages.contains(app.packageName),
+                            onCheckedChange = { checked -> onToggle(app.packageName, checked) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("סגור") }
         }
     )
 }
