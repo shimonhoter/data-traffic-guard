@@ -120,10 +120,9 @@ class MainActivity : ComponentActivity() {
 
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
-                            val enforced = vpnStatus.enforcedPackages
-                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
+                            val allPackages = usage.map { it.packageName }.toSet()
                             value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis)
+                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis)
                             }
                             delay(5000L)
                         }
@@ -288,6 +287,19 @@ fun DashboardScaffold(
     var showAppListDialog by remember { mutableStateOf(false) }
     var screenOffOnlyFilter by remember { mutableStateOf(false) }
 
+    val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled || screenOnAllowlistEnabled
+    val selectedMode = when {
+        travelModeEnabled -> 0
+        screenOffAllowlistEnabled -> 1
+        screenOnAllowlistEnabled -> 2
+        else -> 0
+    }
+    fun selectMode(mode: Int) {
+        onTravelModeToggled(mode == 0)
+        onScreenOffAllowlistToggled(mode == 1)
+        onScreenOnAllowlistToggled(mode == 2)
+    }
+
     val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode, screenOffOnlyFilter, screenOffAllowedPackages) {
         usage
             .filter { app ->
@@ -319,18 +331,6 @@ fun DashboardScaffold(
                 elevation = CardDefaults.cardElevation(0.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                    val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled || screenOnAllowlistEnabled
-                    val selectedMode = when {
-                        travelModeEnabled -> 0
-                        screenOffAllowlistEnabled -> 1
-                        screenOnAllowlistEnabled -> 2
-                        else -> 0
-                    }
-                    fun selectMode(mode: Int) {
-                        onTravelModeToggled(mode == 0)
-                        onScreenOffAllowlistToggled(mode == 1)
-                        onScreenOnAllowlistToggled(mode == 2)
-                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -503,7 +503,7 @@ fun DashboardScaffold(
                     FilterChip(
                         selected = screenOffOnlyFilter,
                         onClick = { screenOffOnlyFilter = !screenOffOnlyFilter },
-                        label = { Text("מותרות במסך כבוי", style = MaterialTheme.typography.labelMedium) },
+                        label = { Text(if (selectedMode == 2) "מותרות במסך דלוק" else "מותרות במסך כבוי", style = MaterialTheme.typography.labelMedium) },
                         shape = RoundedCornerShape(50)
                     )
                 }
@@ -552,6 +552,8 @@ fun DashboardScaffold(
                         maxBytesToday = maxBytesToday,
                         screenOffAllowed = screenOffAllowedPackages.contains(app.packageName),
                         onToggleScreenOffAllowed = { allowed -> onToggleScreenOffAllowed(app.packageName, allowed) },
+                        toggleLabel = if (selectedMode == 2) "מסך דלוק" else "מסך כבוי",
+                        toggleIcon = if (selectedMode == 2) "☀️" else "🌙",
                         onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
                     )
                 }
@@ -642,6 +644,8 @@ private fun AppUsageRow(
     maxBytesToday: Long,
     screenOffAllowed: Boolean = false,
     onToggleScreenOffAllowed: (Boolean) -> Unit = {},
+    toggleLabel: String = "מסך כבוי",
+    toggleIcon: String = "🌙",
     onToggleBlocked: (Boolean) -> Unit
 ) {
     val barColor = when {
@@ -704,9 +708,9 @@ private fun AppUsageRow(
                 }
                 Spacer(modifier = Modifier.width(4.dp))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("מסך כבוי", style = MaterialTheme.typography.labelSmall)
+                    Text(toggleLabel, style = MaterialTheme.typography.labelSmall)
                     IconToggleButton(checked = screenOffAllowed, onCheckedChange = onToggleScreenOffAllowed) {
-                        Text(if (screenOffAllowed) "🌙✓" else "🌙", style = MaterialTheme.typography.labelMedium)
+                        Text(if (screenOffAllowed) "$toggleIcon✓" else toggleIcon, style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
