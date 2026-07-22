@@ -51,6 +51,7 @@ class VpnGuardService : VpnService() {
         const val EXTRA_SCREEN_OFF_ENABLED = "screen_off_enabled"
         const val EXTRA_SCREEN_OFF_ALLOWED = "screen_off_allowed"
         const val EXTRA_SCREEN_ON_ENABLED = "screen_on_enabled"
+        const val EXTRA_SCREEN_ON_ALLOWED = "screen_on_allowed"
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
@@ -78,6 +79,7 @@ class VpnGuardService : VpnService() {
     private var screenOffAllowlistEnabled: Boolean = false
     private var screenOffAllowedPackages: Set<String> = emptySet()
     private var screenOnAllowlistEnabled: Boolean = false
+    private var screenOnAllowedPackages: Set<String> = emptySet()
     private var screenReceiverRegistered = false
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -117,6 +119,7 @@ class VpnGuardService : VpnService() {
         screenOffAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_OFF_ENABLED, false) ?: false
         screenOffAllowedPackages = intent?.getStringArrayListExtra(EXTRA_SCREEN_OFF_ALLOWED)?.toSet() ?: emptySet()
         screenOnAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_ON_ENABLED, false) ?: false
+        screenOnAllowedPackages = intent?.getStringArrayListExtra(EXTRA_SCREEN_ON_ALLOWED)?.toSet() ?: emptySet()
 
         travelJob?.cancel()
         travelJob = null
@@ -150,7 +153,7 @@ class VpnGuardService : VpnService() {
                 allNetworkPackages()
             }
             screenOnAllowlistEnabled && !screenOff -> {
-                val allowed = (computeWhitelist() + screenOffAllowedPackages) - currentManualBlocked
+                val allowed = (computeWhitelist() + screenOnAllowedPackages) - currentManualBlocked
                 allNetworkPackages() - allowed
             }
             else -> currentManualBlocked

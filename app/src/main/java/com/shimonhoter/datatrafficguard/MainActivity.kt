@@ -64,6 +64,12 @@ enum class CategoryFilter(val label: String) {
     SYSTEM_APPS("אפליקציות מערכת/יצרן")
 }
 
+enum class AppListFilterMode(val label: String) {
+    ALL("הכל"),
+    SCREEN_OFF("מותרות במסך כבוי"),
+    SCREEN_ON("מותרות במסך דלוק")
+}
+
 class MainActivity : ComponentActivity() {
 
     private val usageAccessGranted = mutableStateOf(false)
@@ -117,6 +123,7 @@ class MainActivity : ComponentActivity() {
                     val screenOffAllowlistEnabled by policyEngine.screenOffAllowlistEnabled.collectAsState(initial = false)
                     val screenOffAllowedPackages by policyEngine.screenOffAllowedPackages.collectAsState(initial = emptySet())
                     val screenOnAllowlistEnabled by policyEngine.screenOnAllowlistEnabled.collectAsState(initial = false)
+                    val screenOnAllowedPackages by policyEngine.screenOnAllowedPackages.collectAsState(initial = emptySet())
 
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
@@ -162,6 +169,10 @@ class MainActivity : ComponentActivity() {
                         screenOnAllowlistEnabled = screenOnAllowlistEnabled,
                         onScreenOnAllowlistToggled = { enabled ->
                             lifecycleScope.launch { policyEngine.setScreenOnAllowlistEnabled(enabled) }
+                        },
+                        screenOnAllowedPackages = screenOnAllowedPackages,
+                        onToggleScreenOnAllowed = { pkg, allowed ->
+                            lifecycleScope.launch { policyEngine.setScreenOnAllowed(pkg, allowed) }
                         }
                     )
                 } else {
@@ -275,7 +286,9 @@ fun DashboardScaffold(
     onScreenOffAllowlistToggled: (Boolean) -> Unit = {},
     onToggleScreenOffAllowed: (String, Boolean) -> Unit = { _, _ -> },
     screenOnAllowlistEnabled: Boolean = false,
-    onScreenOnAllowlistToggled: (Boolean) -> Unit = {}
+    onScreenOnAllowlistToggled: (Boolean) -> Unit = {},
+    screenOnAllowedPackages: Set<String> = emptySet(),
+    onToggleScreenOnAllowed: (String, Boolean) -> Unit = { _, _ -> }
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
@@ -285,7 +298,8 @@ fun DashboardScaffold(
     var categoryMenuExpanded by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
     var showAppListDialog by remember { mutableStateOf(false) }
-    var screenOffOnlyFilter by remember { mutableStateOf(false) }
+    var appListFilterMode by remember { mutableStateOf(AppListFilterMode.ALL) }
+    var appListFilterMenuExpanded by remember { mutableStateOf(false) }
 
     val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled || screenOnAllowlistEnabled
     val selectedMode = when {
@@ -300,7 +314,7 @@ fun DashboardScaffold(
         onScreenOnAllowlistToggled(mode == 2)
     }
 
-    val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode, screenOffOnlyFilter, screenOffAllowedPackages) {
+    val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode, appListFilterMode, screenOffAllowedPackages, screenOnAllowedPackages) {
         usage
             .filter { app ->
                 when (categoryFilter) {
@@ -310,7 +324,13 @@ fun DashboardScaffold(
                 }
             }
             .filter { app -> !activeOnly || app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0 }
-            .filter { app -> !screenOffOnlyFilter || screenOffAllowedPackages.contains(app.packageName) }
+            .filter { app ->
+                when (appListFilterMode) {
+                    AppListFilterMode.ALL -> true
+                    AppListFilterMode.SCREEN_OFF -> screenOffAllowedPackages.contains(app.packageName)
+                    AppListFilterMode.SCREEN_ON -> screenOnAllowedPackages.contains(app.packageName)
+                }
+            }
             .filter { app -> searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true) }
             .let { list ->
                 when (sortMode) {
@@ -389,11 +409,12 @@ fun DashboardScaffold(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    "${screenOffAllowedPackages.size} אפליקציות נבחרות",
+                                    if (selectedMode == 1) "${screenOffAllowedPackages.size} אפליקציות נבחרות"
+                                    else "${screenOnAllowedPackages.size} אפליקציות נבחרות",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 TextButton(onClick = {
-                                    screenOffOnlyFilter = true
+                                    appListFilterMode = if (selectedMode == 1) AppListFilterMode.SCREEN_OFF else AppListFilterMode.SCREEN_ON
                                     showAppListDialog = true
                                 }) { Text("ערוך רשימה") }
                             }
@@ -500,11 +521,11 @@ fun DashboardScaffold(
                         onToggle = { activeOnly = it }
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    FilterChip(
-                        selected = screenOffOnlyFilter,
-                        onClick = { screenOffOnlyFilter = !screenOffOnlyFilter },
-                        label = { Text(if (selectedMode == 2) "מותרות במסך דלוק" else "מותרות במסך כבוי", style = MaterialTheme.typography.labelMedium) },
-                        shape = RoundedCornerShape(50)
+                    AppListFilterControl(
+                        selected = appListFilterMode,
+                        expanded = appListFilterMenuExpanded,
+                        onExpandedChange = { appListFilterMenuExpanded = it },
+                        onSelect = { appListFilterMode = it }
                     )
                 }
                 SortControl(
@@ -550,10 +571,14 @@ fun DashboardScaffold(
                         isBlocked = blockedPackages.contains(app.packageName),
                         enabled = !travelModeEnabled,
                         maxBytesToday = maxBytesToday,
-                        screenOffAllowed = screenOffAllowedPackages.contains(app.packageName),
-                        onToggleScreenOffAllowed = { allowed -> onToggleScreenOffAllowed(app.packageName, allowed) },
+                        screenOffAllowed = if (selectedMode == 2) screenOnAllowedPackages.contains(app.packageName) else screenOffAllowedPackages.contains(app.packageName),
+                        onToggleScreenOffAllowed = { allowed ->
+                            if (selectedMode == 2) onToggleScreenOnAllowed(app.packageName, allowed)
+                            else onToggleScreenOffAllowed(app.packageName, allowed)
+                        },
                         toggleLabel = if (selectedMode == 2) "מסך דלוק" else "מסך כבוי",
                         toggleIcon = if (selectedMode == 2) "☀️" else "🌙",
+                        showModeToggle = selectedMode == 1 || selectedMode == 2,
                         onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
                     )
                 }
@@ -593,8 +618,35 @@ private fun CategoryFilterControl(
     }
 }
 
+
 @Composable
-private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
+private fun AppListFilterControl(
+    selected: AppListFilterMode,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (AppListFilterMode) -> Unit
+) {
+    Box {
+        FilterChip(
+            selected = selected != AppListFilterMode.ALL,
+            onClick = { onExpandedChange(true) },
+            label = { Text(selected.label, style = MaterialTheme.typography.labelMedium) },
+            shape = RoundedCornerShape(50)
+        )
+        DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
+            AppListFilterMode.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text(mode.label) },
+                    onClick = { onSelect(mode); onExpandedChange(false) },
+                    leadingIcon = {
+                        if (mode == selected) Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                )
+            }
+        }
+    }
+}
+(active: Boolean, onToggle: (Boolean) -> Unit) {
     Spacer(modifier = Modifier.width(6.dp))
     FilterChip(
         selected = active,
@@ -646,6 +698,7 @@ private fun AppUsageRow(
     onToggleScreenOffAllowed: (Boolean) -> Unit = {},
     toggleLabel: String = "מסך כבוי",
     toggleIcon: String = "🌙",
+    showModeToggle: Boolean = true,
     onToggleBlocked: (Boolean) -> Unit
 ) {
     val barColor = when {
@@ -706,11 +759,13 @@ private fun AppUsageRow(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.width(4.dp))
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(toggleLabel, style = MaterialTheme.typography.labelSmall)
-                    IconToggleButton(checked = screenOffAllowed, onCheckedChange = onToggleScreenOffAllowed) {
-                        Text(if (screenOffAllowed) "$toggleIcon✓" else toggleIcon, style = MaterialTheme.typography.labelMedium)
+                if (showModeToggle) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(toggleLabel, style = MaterialTheme.typography.labelSmall)
+                        IconToggleButton(checked = screenOffAllowed, onCheckedChange = onToggleScreenOffAllowed) {
+                            Text(if (screenOffAllowed) "$toggleIcon✓" else toggleIcon, style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
                 Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)

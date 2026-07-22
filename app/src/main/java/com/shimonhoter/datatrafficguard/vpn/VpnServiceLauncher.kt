@@ -11,16 +11,16 @@ object VpnServiceLauncher {
         blocked: Set<String>,
         screenOffAllowlistEnabled: Boolean = false,
         screenOffAllowedPackages: Set<String> = emptySet(),
-        screenOnAllowlistEnabled: Boolean = false
+        screenOnAllowlistEnabled: Boolean = false,
+        screenOnAllowedPackages: Set<String> = emptySet()
     ) {
         val serviceIntent = Intent(context, VpnGuardService::class.java).apply {
             putExtra(VpnGuardService.EXTRA_MODE, if (travelModeEnabled) "travel" else "manual")
-            // Always include the manual block list, even in travel mode — it applies
-            // on top of whichever restriction mode is active.
             putStringArrayListExtra(VpnGuardService.EXTRA_BLOCKED_PACKAGES, ArrayList(blocked))
             putExtra(VpnGuardService.EXTRA_SCREEN_OFF_ENABLED, screenOffAllowlistEnabled)
             putStringArrayListExtra(VpnGuardService.EXTRA_SCREEN_OFF_ALLOWED, ArrayList(screenOffAllowedPackages))
             putExtra(VpnGuardService.EXTRA_SCREEN_ON_ENABLED, screenOnAllowlistEnabled)
+            putStringArrayListExtra(VpnGuardService.EXTRA_SCREEN_ON_ALLOWED, ArrayList(screenOnAllowedPackages))
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
