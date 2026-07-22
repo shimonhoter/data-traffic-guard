@@ -306,6 +306,7 @@ fun DashboardScaffold(
     var showQuotaDialog by remember { mutableStateOf(false) }
     var showAppListDialog by remember { mutableStateOf(false) }
     var appListFilterMode by remember { mutableStateOf(AppListFilterMode.ALL) }
+    var editTarget by remember { mutableStateOf(AppListFilterMode.MANUAL_BLOCK) }
     var appListFilterMenuExpanded by remember { mutableStateOf(false) }
 
     val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled || screenOnAllowlistEnabled
@@ -422,7 +423,8 @@ fun DashboardScaffold(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 TextButton(onClick = {
-                                    appListFilterMode = if (selectedMode == 1) AppListFilterMode.SCREEN_OFF else AppListFilterMode.SCREEN_ON
+                                    editTarget = if (selectedMode == 1) AppListFilterMode.SCREEN_OFF else AppListFilterMode.SCREEN_ON
+                                    appListFilterMode = editTarget
                                     showAppListDialog = true
                                 }) { Text("ערוך רשימה") }
                             }
@@ -473,7 +475,11 @@ fun DashboardScaffold(
             Spacer(modifier = Modifier.height(16.dp))
 
             OutlinedButton(
-                onClick = { showAppListDialog = true },
+                onClick = {
+                    editTarget = AppListFilterMode.MANUAL_BLOCK
+                    appListFilterMode = AppListFilterMode.ALL
+                    showAppListDialog = true
+                },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -585,7 +591,7 @@ fun DashboardScaffold(
             }
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(displayedUsage, key = { it.uid }) { app ->
-                    val (switchChecked, onSwitchToggle) = when (appListFilterMode) {
+                    val (switchChecked, onSwitchToggle) = when (editTarget) {
                         AppListFilterMode.SCREEN_OFF -> screenOffAllowedPackages.contains(app.packageName) to { checked: Boolean -> onToggleScreenOffAllowed(app.packageName, checked) }
                         AppListFilterMode.SCREEN_ON -> screenOnAllowedPackages.contains(app.packageName) to { checked: Boolean -> onToggleScreenOnAllowed(app.packageName, checked) }
                         else -> blockedPackages.contains(app.packageName) to { checked: Boolean -> onToggleBlocked(app.packageName, checked) }
