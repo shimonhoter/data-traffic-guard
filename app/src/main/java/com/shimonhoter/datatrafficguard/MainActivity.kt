@@ -364,7 +364,7 @@ fun DashboardScaffold(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "${'$'}{screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
+                            "${screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
                             style = MaterialTheme.typography.bodySmall
                         )
                         TextButton(onClick = { showScreenOffDialog = true }) { Text("ערוך רשימה") }
@@ -444,7 +444,7 @@ fun DashboardScaffold(
             }
             Spacer(modifier = Modifier.height(8.dp))
 
-            LazyColumn {
+            LazyColumn(modifier = Modifier.weight(1f)) {
                 items(displayedUsage, key = { it.uid }) { app ->
                     AppUsageRow(
                         app = app,
