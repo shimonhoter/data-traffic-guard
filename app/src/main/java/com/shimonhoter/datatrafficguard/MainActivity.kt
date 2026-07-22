@@ -13,6 +13,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
@@ -444,12 +446,16 @@ fun DashboardScaffold(
             }
             Spacer(modifier = Modifier.height(8.dp))
 
+            val maxBytesToday = remember(displayedUsage) {
+                displayedUsage.maxOfOrNull { it.totalBytesToday }?.coerceAtLeast(1L) ?: 1L
+            }
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(displayedUsage, key = { it.uid }) { app ->
                     AppUsageRow(
                         app = app,
                         isBlocked = blockedPackages.contains(app.packageName),
                         enabled = !travelModeEnabled,
+                        maxBytesToday = maxBytesToday,
                         onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
                     )
                 }
@@ -486,11 +492,13 @@ private fun CategoryFilterControl(
     onSelect: (CategoryFilter) -> Unit
 ) {
     Box {
-        TextButton(onClick = { onExpandedChange(true) }) {
-            Icon(Icons.Filled.FilterAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(selected.label, style = MaterialTheme.typography.labelMedium)
-        }
+        FilterChip(
+            selected = selected != CategoryFilter.ALL,
+            onClick = { onExpandedChange(true) },
+            label = { Text(selected.label, style = MaterialTheme.typography.labelMedium) },
+            leadingIcon = { Icon(Icons.Filled.FilterAlt, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            shape = RoundedCornerShape(50)
+        )
         DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
             CategoryFilter.entries.forEach { filter ->
                 DropdownMenuItem(
@@ -505,25 +513,23 @@ private fun CategoryFilterControl(
     }
 }
 
-@Composable
 private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
-    TextButton(onClick = { onToggle(!active) }) {
-        Icon(
-            imageVector = if (active) Icons.Filled.Bolt else Icons.Outlined.Bolt,
-            contentDescription = null,
-            modifier = Modifier.size(18.dp),
-            tint = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current
-        )
-        Spacer(modifier = Modifier.width(4.dp))
-        Text(
-            "פעילות בלבד",
-            style = MaterialTheme.typography.labelMedium,
-            color = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current
-        )
-    }
+    Spacer(modifier = Modifier.width(6.dp))
+    FilterChip(
+        selected = active,
+        onClick = { onToggle(!active) },
+        label = { Text("פעילות בלבד", style = MaterialTheme.typography.labelMedium) },
+        leadingIcon = {
+            Icon(
+                imageVector = if (active) Icons.Filled.Bolt else Icons.Outlined.Bolt,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
+        },
+        shape = RoundedCornerShape(50)
+    )
 }
 
-@Composable
 private fun SortControl(
     selected: SortMode,
     expanded: Boolean,
@@ -553,53 +559,80 @@ private fun AppUsageRow(
     app: AppUsageSnapshot,
     isBlocked: Boolean,
     enabled: Boolean,
+    maxBytesToday: Long,
     onToggleBlocked: (Boolean) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(app.label, style = MaterialTheme.typography.bodyLarge)
-                if (app.unsupported) {
-                    Text("לא זמין", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else if (isBlocked) {
-                    Text(
-                        "חסום — נתוני צריכה לא מוצגים (לרוב ניסיונות שנחסמו, לא נתונים אמיתיים)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0) {
-                        val context = LocalContext.current
-                        TextButton(
-                            onClick = {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                        data = Uri.parse("package:${app.packageName}")
-                                    }
-                                )
-                            },
-                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
-                        ) { Text("עדיין רואה קצב חי? עצור בכל זאת (Force Stop)", style = MaterialTheme.typography.labelSmall) }
+    val barColor = when {
+        isBlocked -> MaterialTheme.colorScheme.error
+        app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0 -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isBlocked)
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+            else
+                MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(app.label, style = MaterialTheme.typography.bodyLarge)
+                    if (app.unsupported) {
+                        Text("לא זמין", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else if (isBlocked) {
+                        Text(
+                            "חסום — נתוני צריכה לא מוצגים (לרוב ניסיונות שנחסמו, לא נתונים אמיתיים)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0) {
+                            val context = LocalContext.current
+                            TextButton(
+                                onClick = {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                            data = Uri.parse("package:${app.packageName}")
+                                        }
+                                    )
+                                },
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
+                            ) { Text("עדיין רואה קצב חי? עצור בכל זאת (Force Stop)", style = MaterialTheme.typography.labelSmall) }
+                        }
+                    } else {
+                        Text(
+                            "היום: ${formatBytes(app.totalBytesToday)} · מצטבר מתחילת המחזור: ${formatBytes(app.totalBytesSinceCycleStart)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                } else {
-                    Text(
-                        "היום: ${formatBytes(app.totalBytesToday)} · מצטבר מתחילת המחזור: ${formatBytes(app.totalBytesSinceCycleStart)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        "↓${formatBytes(app.rxBytesPerSecond)}/ש  ↑${formatBytes(app.txBytesPerSecond)}/ש",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
+                Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
             }
-            Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
+            if (!app.unsupported) {
+                Spacer(modifier = Modifier.height(8.dp))
+                val fraction = (app.totalBytesToday.toFloat() / maxBytesToday.toFloat()).coerceIn(0f, 1f)
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
+                    color = barColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
