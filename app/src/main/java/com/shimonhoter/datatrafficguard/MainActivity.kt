@@ -13,6 +13,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -268,6 +271,7 @@ fun DashboardScaffold(
     var categoryMenuExpanded by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
     var showScreenOffDialog by remember { mutableStateOf(false) }
+    var showAppListDialog by remember { mutableStateOf(false) }
 
     val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode) {
         usage
@@ -385,7 +389,56 @@ fun DashboardScaffold(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedTextField(
+            OutlinedButton(
+                onClick = { showAppListDialog = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("הצג רשימת אפליקציות (${usage.size})")
+            }
+        }
+    }
+
+    if (showQuotaDialog) {
+        QuotaEditDialog(
+            quotaSettings = quotaSettings,
+            onDismiss = { showQuotaDialog = false },
+            onSave = { quotaBytes, thresholdPercent ->
+                onSetQuota(quotaBytes, thresholdPercent)
+                showQuotaDialog = false
+            }
+        )
+    }
+
+    if (showScreenOffDialog) {
+        ScreenOffAllowlistDialog(
+            apps = usage,
+            allowedPackages = screenOffAllowedPackages,
+            onDismiss = { showScreenOffDialog = false },
+            onToggle = onToggleScreenOffAllowed
+        )
+    }
+
+    if (showAppListDialog) {
+        Dialog(
+            onDismissRequest = { showAppListDialog = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("רשימת אפליקציות", style = MaterialTheme.typography.titleLarge)
+                        IconButton(onClick = { showAppListDialog = false }) {
+                            Icon(Icons.Filled.Close, contentDescription = "סגור")
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 modifier = Modifier.fillMaxWidth(),
@@ -460,27 +513,9 @@ fun DashboardScaffold(
                     )
                 }
             }
-        }
-    }
-
-    if (showQuotaDialog) {
-        QuotaEditDialog(
-            quotaSettings = quotaSettings,
-            onDismiss = { showQuotaDialog = false },
-            onSave = { quotaBytes, thresholdPercent ->
-                onSetQuota(quotaBytes, thresholdPercent)
-                showQuotaDialog = false
+                }
             }
-        )
-    }
-
-    if (showScreenOffDialog) {
-        ScreenOffAllowlistDialog(
-            apps = usage,
-            allowedPackages = screenOffAllowedPackages,
-            onDismiss = { showScreenOffDialog = false },
-            onToggle = onToggleScreenOffAllowed
-        )
+        }
     }
 }
 
