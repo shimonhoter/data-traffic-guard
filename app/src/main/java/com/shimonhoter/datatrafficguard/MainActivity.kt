@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Dialog
@@ -76,7 +77,7 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == RESULT_OK) {
             if (pendingTravelMode) {
-                startTravelModeService(pendingScreenOffEnabled, pendingScreenOffAllowed)
+                startTravelModeService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed)
             } else {
                 startGuardService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed)
             }
@@ -182,11 +183,12 @@ class MainActivity : ComponentActivity() {
             val intent = VpnService.prepare(this)
             if (intent != null) {
                 pendingTravelMode = true
+                pendingBlocked = blocked
                 pendingScreenOffEnabled = screenOffAllowlistEnabled
                 pendingScreenOffAllowed = screenOffAllowedPackages
                 vpnPermissionLauncher.launch(intent)
             } else {
-                startTravelModeService(screenOffAllowlistEnabled, screenOffAllowedPackages)
+                startTravelModeService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages)
             }
             return
         }
@@ -206,11 +208,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startTravelModeService(screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
+    private fun startTravelModeService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
         VpnServiceLauncher.launch(
             this,
             travelModeEnabled = true,
-            blocked = emptySet(),
+            blocked = blocked,
             screenOffAllowlistEnabled = screenOffEnabled,
             screenOffAllowedPackages = screenOffAllowed
         )
@@ -304,27 +306,97 @@ fun DashboardScaffold(
                 elevation = CardDefaults.cardElevation(0.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                    val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled
+                    val foregroundOnlySelected = travelModeEnabled || !screenOffAllowlistEnabled
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
-                            Text("מצב נסיעה", style = MaterialTheme.typography.titleMedium)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("הגבלת נתונים", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "רשת זמינה רק לאפליקציה שבחזית",
+                                "כשמופעל: בחר אם רק אפליקציית החזית מקבלת רשת, או שהכל מותר כשהמסך דלוק ורק אפליקציות נבחרות כשהמסך כבוי",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
-                        Switch(checked = travelModeEnabled, onCheckedChange = onTravelModeToggled)
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    if (!travelModeEnabled) {
-                        Text(
-                            "${blockedPackages.size} אפליקציות מסומנות לחסימה ידנית",
-                            style = MaterialTheme.typography.bodySmall
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = dataRestrictionEnabled,
+                            onCheckedChange = { enabled ->
+                                if (enabled) {
+                                    onTravelModeToggled(true)
+                                    onScreenOffAllowlistToggled(false)
+                                } else {
+                                    onTravelModeToggled(false)
+                                    onScreenOffAllowlistToggled(false)
+                                }
+                            }
                         )
                     }
+                    if (dataRestrictionEnabled) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().selectable(
+                                selected = foregroundOnlySelected,
+                                onClick = {
+                                    onTravelModeToggled(true)
+                                    onScreenOffAllowlistToggled(false)
+                                }
+                            ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = foregroundOnlySelected,
+                                onClick = {
+                                    onTravelModeToggled(true)
+                                    onScreenOffAllowlistToggled(false)
+                                }
+                            )
+                            Text("רק אפליקציה בחזית", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().selectable(
+                                selected = !foregroundOnlySelected,
+                                onClick = {
+                                    onTravelModeToggled(false)
+                                    onScreenOffAllowlistToggled(true)
+                                }
+                            ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = !foregroundOnlySelected,
+                                onClick = {
+                                    onTravelModeToggled(false)
+                                    onScreenOffAllowlistToggled(true)
+                                }
+                            )
+                            Text("רק אפליקציות נבחרות כשהמסך כבוי (הכל מותר כשהמסך דלוק)", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        if (!foregroundOnlySelected) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(start = 40.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "${screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                TextButton(onClick = {
+                                    screenOffOnlyFilter = true
+                                    showAppListDialog = true
+                                }) { Text("ערוך רשימה") }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "${blockedPackages.size} אפליקציות מסומנות לחסימה ידנית",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = when {
@@ -339,47 +411,6 @@ fun DashboardScaffold(
                         color = if (vpnStatus.tunnelActive) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.error
                     )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-                elevation = CardDefaults.cardElevation(0.dp)
-            ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("הגבלה כשהמסך כבוי", style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "רק אפליקציות נבחרות ישמרו על גישה לרשת כשהמסך כבוי — פועל גם במצב נסיעה וגם במצב ידני",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(checked = screenOffAllowlistEnabled, onCheckedChange = onScreenOffAllowlistToggled)
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "${screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        TextButton(onClick = {
-                            screenOffOnlyFilter = true
-                            showAppListDialog = true
-                        }) { Text("ערוך רשימה") }
-                    }
                 }
             }
 

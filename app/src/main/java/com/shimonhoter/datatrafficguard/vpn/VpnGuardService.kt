@@ -111,6 +111,7 @@ class VpnGuardService : VpnService() {
         val generation = currentGeneration.incrementAndGet()
 
         currentMode = mode
+        currentManualBlocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
         screenOffAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_OFF_ENABLED, false) ?: false
         screenOffAllowedPackages = intent?.getStringArrayListExtra(EXTRA_SCREEN_OFF_ALLOWED)?.toSet() ?: emptySet()
 
@@ -120,7 +121,6 @@ class VpnGuardService : VpnService() {
         if (mode == GuardMode.TRAVEL) {
             startTravelMode(generation)
         } else {
-            currentManualBlocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
             rebuild(effectiveManualBlocked(), GuardMode.MANUAL, null, generation)
         }
         return START_STICKY
@@ -150,11 +150,12 @@ class VpnGuardService : VpnService() {
                     val whitelist = computeWhitelist()
                     val allNetworkPkgs = allNetworkPackages()
                     val foreground = if (screenOff) null else foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
-                    val allowed = if (screenOffAllowlistEnabled && screenOff) {
+                    val allowedBase = if (screenOffAllowlistEnabled && screenOff) {
                         whitelist + screenOffAllowedPackages
                     } else {
                         whitelist + (foreground?.let { setOf(it) } ?: emptySet())
                     }
+                    val allowed = allowedBase - currentManualBlocked
 
                     if (allowed != lastAllowed) {
                         // Allow-list actually changed — worth tearing down and re-establishing the tunnel.
