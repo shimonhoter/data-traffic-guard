@@ -513,6 +513,7 @@ private fun CategoryFilterControl(
     }
 }
 
+@Composable
 private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
     Spacer(modifier = Modifier.width(6.dp))
     FilterChip(
@@ -530,6 +531,7 @@ private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
     )
 }
 
+@Composable
 private fun SortControl(
     selected: SortMode,
     expanded: Boolean,
