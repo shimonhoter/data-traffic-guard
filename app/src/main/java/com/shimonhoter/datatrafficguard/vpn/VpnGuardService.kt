@@ -50,6 +50,7 @@ class VpnGuardService : VpnService() {
         const val EXTRA_MODE = "mode"
         const val EXTRA_SCREEN_OFF_ENABLED = "screen_off_enabled"
         const val EXTRA_SCREEN_OFF_ALLOWED = "screen_off_allowed"
+        const val EXTRA_SCREEN_ON_ENABLED = "screen_on_enabled"
         private const val CHANNEL_ID = "vpn_guard_channel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
@@ -76,6 +77,7 @@ class VpnGuardService : VpnService() {
     private var currentManualBlocked: Set<String> = emptySet()
     private var screenOffAllowlistEnabled: Boolean = false
     private var screenOffAllowedPackages: Set<String> = emptySet()
+    private var screenOnAllowlistEnabled: Boolean = false
     private var screenReceiverRegistered = false
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -114,6 +116,7 @@ class VpnGuardService : VpnService() {
         currentManualBlocked = intent?.getStringArrayListExtra(EXTRA_BLOCKED_PACKAGES)?.toSet() ?: emptySet()
         screenOffAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_OFF_ENABLED, false) ?: false
         screenOffAllowedPackages = intent?.getStringArrayListExtra(EXTRA_SCREEN_OFF_ALLOWED)?.toSet() ?: emptySet()
+        screenOnAllowlistEnabled = intent?.getBooleanExtra(EXTRA_SCREEN_ON_ENABLED, false) ?: false
 
         travelJob?.cancel()
         travelJob = null
@@ -131,14 +134,27 @@ class VpnGuardService : VpnService() {
         return pm != null && !pm.isInteractive
     }
 
-    /** Manual mode's blocked set, widened to "everything but the screen-off allowlist"
-     *  whenever the screen is off and that restriction is turned on. */
+    /** Manual mode's effective blocked set. Both restriction modes share the same
+     *  selected-apps list (screenOffAllowedPackages); only which flag is enabled decides
+     *  whether that list is the screen-off allowlist or the screen-on allowlist. The
+     *  manual per-app block list always applies on top of whichever mode is active. */
     private fun effectiveManualBlocked(): Set<String> {
-        if (screenOffAllowlistEnabled && isScreenOff()) {
-            val allowed = computeWhitelist() + screenOffAllowedPackages
-            return allNetworkPackages() - allowed
+        val screenOff = isScreenOff()
+        return when {
+            screenOffAllowlistEnabled && screenOff -> {
+                val allowed = (computeWhitelist() + screenOffAllowedPackages) - currentManualBlocked
+                allNetworkPackages() - allowed
+            }
+            screenOnAllowlistEnabled && screenOff -> {
+                // "Only selected apps when screen is on" mode: nobody gets data while the screen is off.
+                allNetworkPackages()
+            }
+            screenOnAllowlistEnabled && !screenOff -> {
+                val allowed = (computeWhitelist() + screenOffAllowedPackages) - currentManualBlocked
+                allNetworkPackages() - allowed
+            }
+            else -> currentManualBlocked
         }
-        return currentManualBlocked
     }
 
     private fun startTravelMode(generation: Int) {

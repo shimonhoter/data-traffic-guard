@@ -71,15 +71,16 @@ class MainActivity : ComponentActivity() {
     private var pendingTravelMode = false
     private var pendingScreenOffEnabled = false
     private var pendingScreenOffAllowed: Set<String> = emptySet()
+    private var pendingScreenOnEnabled = false
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
             if (pendingTravelMode) {
-                startTravelModeService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed)
+                startTravelModeService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed, pendingScreenOnEnabled)
             } else {
-                startGuardService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed)
+                startGuardService(pendingBlocked, pendingScreenOffEnabled, pendingScreenOffAllowed, pendingScreenOnEnabled)
             }
         }
     }
@@ -115,6 +116,7 @@ class MainActivity : ComponentActivity() {
                     val quotaSettings by quotaEngine.settings.collectAsState(initial = QuotaSettings())
                     val screenOffAllowlistEnabled by policyEngine.screenOffAllowlistEnabled.collectAsState(initial = false)
                     val screenOffAllowedPackages by policyEngine.screenOffAllowedPackages.collectAsState(initial = emptySet())
+                    val screenOnAllowlistEnabled by policyEngine.screenOnAllowlistEnabled.collectAsState(initial = false)
 
                     val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
@@ -127,8 +129,8 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    LaunchedEffect(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages) {
-                        applyPolicy(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages)
+                    LaunchedEffect(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled) {
+                        applyPolicy(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled)
                     }
 
                     DashboardScaffold(
@@ -157,6 +159,10 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleScreenOffAllowed = { pkg, allowed ->
                             lifecycleScope.launch { policyEngine.setScreenOffAllowed(pkg, allowed) }
+                        },
+                        screenOnAllowlistEnabled = screenOnAllowlistEnabled,
+                        onScreenOnAllowlistToggled = { enabled ->
+                            lifecycleScope.launch { policyEngine.setScreenOnAllowlistEnabled(enabled) }
                         }
                     )
                 } else {
@@ -177,7 +183,8 @@ class MainActivity : ComponentActivity() {
         travelModeEnabled: Boolean,
         blocked: Set<String>,
         screenOffAllowlistEnabled: Boolean,
-        screenOffAllowedPackages: Set<String>
+        screenOffAllowedPackages: Set<String>,
+        screenOnAllowlistEnabled: Boolean
     ) {
         if (travelModeEnabled) {
             val intent = VpnService.prepare(this)
@@ -186,14 +193,15 @@ class MainActivity : ComponentActivity() {
                 pendingBlocked = blocked
                 pendingScreenOffEnabled = screenOffAllowlistEnabled
                 pendingScreenOffAllowed = screenOffAllowedPackages
+                pendingScreenOnEnabled = screenOnAllowlistEnabled
                 vpnPermissionLauncher.launch(intent)
             } else {
-                startTravelModeService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages)
+                startTravelModeService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled)
             }
             return
         }
-        if (blocked.isEmpty() && !screenOffAllowlistEnabled) {
-            startGuardService(emptySet(), false, emptySet())
+        if (blocked.isEmpty() && !screenOffAllowlistEnabled && !screenOnAllowlistEnabled) {
+            startGuardService(emptySet(), false, emptySet(), false)
             return
         }
         val intent = VpnService.prepare(this)
@@ -202,29 +210,32 @@ class MainActivity : ComponentActivity() {
             pendingBlocked = blocked
             pendingScreenOffEnabled = screenOffAllowlistEnabled
             pendingScreenOffAllowed = screenOffAllowedPackages
+            pendingScreenOnEnabled = screenOnAllowlistEnabled
             vpnPermissionLauncher.launch(intent)
         } else {
-            startGuardService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages)
+            startGuardService(blocked, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled)
         }
     }
 
-    private fun startTravelModeService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
+    private fun startTravelModeService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>, screenOnEnabled: Boolean) {
         VpnServiceLauncher.launch(
             this,
             travelModeEnabled = true,
             blocked = blocked,
             screenOffAllowlistEnabled = screenOffEnabled,
-            screenOffAllowedPackages = screenOffAllowed
+            screenOffAllowedPackages = screenOffAllowed,
+            screenOnAllowlistEnabled = screenOnEnabled
         )
     }
 
-    private fun startGuardService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>) {
+    private fun startGuardService(blocked: Set<String>, screenOffEnabled: Boolean, screenOffAllowed: Set<String>, screenOnEnabled: Boolean) {
         VpnServiceLauncher.launch(
             this,
             travelModeEnabled = false,
             blocked = blocked,
             screenOffAllowlistEnabled = screenOffEnabled,
-            screenOffAllowedPackages = screenOffAllowed
+            screenOffAllowedPackages = screenOffAllowed,
+            screenOnAllowlistEnabled = screenOnEnabled
         )
     }
 }
@@ -263,7 +274,9 @@ fun DashboardScaffold(
     onSetQuota: (Long, Int) -> Unit = { _, _ -> },
     onResetCycle: () -> Unit = {},
     onScreenOffAllowlistToggled: (Boolean) -> Unit = {},
-    onToggleScreenOffAllowed: (String, Boolean) -> Unit = { _, _ -> }
+    onToggleScreenOffAllowed: (String, Boolean) -> Unit = { _, _ -> },
+    screenOnAllowlistEnabled: Boolean = false,
+    onScreenOnAllowlistToggled: (Boolean) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(CategoryFilter.ALL) }
@@ -306,8 +319,18 @@ fun DashboardScaffold(
                 elevation = CardDefaults.cardElevation(0.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                    val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled
-                    val foregroundOnlySelected = travelModeEnabled || !screenOffAllowlistEnabled
+                    val dataRestrictionEnabled = travelModeEnabled || screenOffAllowlistEnabled || screenOnAllowlistEnabled
+                    val selectedMode = when {
+                        travelModeEnabled -> 0
+                        screenOffAllowlistEnabled -> 1
+                        screenOnAllowlistEnabled -> 2
+                        else -> 0
+                    }
+                    fun selectMode(mode: Int) {
+                        onTravelModeToggled(mode == 0)
+                        onScreenOffAllowlistToggled(mode == 1)
+                        onScreenOnAllowlistToggled(mode == 2)
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -316,65 +339,49 @@ fun DashboardScaffold(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("הגבלת נתונים", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "כשמופעל: בחר אם רק אפליקציית החזית מקבלת רשת, או שהכל מותר כשהמסך דלוק ורק אפליקציות נבחרות כשהמסך כבוי",
+                                "כשמופעל, בחר איזו הגבלה תחול: רק אפליקציית החזית, אפליקציות נבחרות כשהמסך כבוי, או אפליקציות נבחרות כשהמסך דלוק",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
                         Spacer(modifier = Modifier.width(12.dp))
                         Switch(
                             checked = dataRestrictionEnabled,
-                            onCheckedChange = { enabled ->
-                                if (enabled) {
-                                    onTravelModeToggled(true)
-                                    onScreenOffAllowlistToggled(false)
-                                } else {
-                                    onTravelModeToggled(false)
-                                    onScreenOffAllowlistToggled(false)
-                                }
-                            }
+                            onCheckedChange = { enabled -> if (enabled) selectMode(0) else selectMode(-1) }
                         )
                     }
                     if (dataRestrictionEnabled) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth().selectable(
-                                selected = foregroundOnlySelected,
-                                onClick = {
-                                    onTravelModeToggled(true)
-                                    onScreenOffAllowlistToggled(false)
-                                }
+                                selected = selectedMode == 0,
+                                onClick = { selectMode(0) }
                             ),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            RadioButton(
-                                selected = foregroundOnlySelected,
-                                onClick = {
-                                    onTravelModeToggled(true)
-                                    onScreenOffAllowlistToggled(false)
-                                }
-                            )
+                            RadioButton(selected = selectedMode == 0, onClick = { selectMode(0) })
                             Text("רק אפליקציה בחזית", style = MaterialTheme.typography.bodyMedium)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth().selectable(
-                                selected = !foregroundOnlySelected,
-                                onClick = {
-                                    onTravelModeToggled(false)
-                                    onScreenOffAllowlistToggled(true)
-                                }
+                                selected = selectedMode == 1,
+                                onClick = { selectMode(1) }
                             ),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            RadioButton(
-                                selected = !foregroundOnlySelected,
-                                onClick = {
-                                    onTravelModeToggled(false)
-                                    onScreenOffAllowlistToggled(true)
-                                }
-                            )
-                            Text("רק אפליקציות נבחרות כשהמסך כבוי (הכל מותר כשהמסך דלוק)", style = MaterialTheme.typography.bodyMedium)
+                            RadioButton(selected = selectedMode == 1, onClick = { selectMode(1) })
+                            Text("אפליקציות נבחרות מותרות כשהמסך כבוי (הכל מותר כשהמסך דלוק)", style = MaterialTheme.typography.bodyMedium)
                         }
-                        if (!foregroundOnlySelected) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().selectable(
+                                selected = selectedMode == 2,
+                                onClick = { selectMode(2) }
+                            ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = selectedMode == 2, onClick = { selectMode(2) })
+                            Text("אפליקציות נבחרות מותרות כשהמסך דלוק (כלום לא מותר כשהמסך כבוי)", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        if (selectedMode == 1 || selectedMode == 2) {
                             Spacer(modifier = Modifier.height(6.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(start = 40.dp),
@@ -382,7 +389,7 @@ fun DashboardScaffold(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    "${screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
+                                    "${screenOffAllowedPackages.size} אפליקציות נבחרות",
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 TextButton(onClick = {

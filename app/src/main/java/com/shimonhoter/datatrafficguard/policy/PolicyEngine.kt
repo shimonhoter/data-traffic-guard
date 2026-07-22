@@ -13,8 +13,10 @@ private val BLOCKED_PACKAGES_KEY = stringSetPreferencesKey("blocked_packages")
 private val TRAVEL_MODE_KEY = booleanPreferencesKey("travel_mode_enabled")
 private val SCREEN_OFF_ENABLED_KEY = booleanPreferencesKey("screen_off_allowlist_enabled")
 private val SCREEN_OFF_ALLOWED_KEY = stringSetPreferencesKey("screen_off_allowed_packages")
+private val SCREEN_ON_ENABLED_KEY = booleanPreferencesKey("screen_on_allowlist_enabled")
 
-/** Persists manual block choices, the Travel Mode toggle, and the screen-off allowlist across restarts. */
+/** Persists manual block choices, Travel Mode, and the shared selected-apps allowlist
+ *  (reused by both the screen-off and screen-on restriction modes). */
 class PolicyStore(private val context: Context) {
     val blockedPackages: Flow<Set<String>> = context.policyDataStore.data
         .map { prefs -> prefs[BLOCKED_PACKAGES_KEY] ?: emptySet() }
@@ -27,6 +29,9 @@ class PolicyStore(private val context: Context) {
 
     val screenOffAllowedPackages: Flow<Set<String>> = context.policyDataStore.data
         .map { prefs -> prefs[SCREEN_OFF_ALLOWED_KEY] ?: emptySet() }
+
+    val screenOnAllowlistEnabled: Flow<Boolean> = context.policyDataStore.data
+        .map { prefs -> prefs[SCREEN_ON_ENABLED_KEY] ?: false }
 
     suspend fun setBlocked(packageName: String, blocked: Boolean) {
         context.policyDataStore.edit { prefs ->
@@ -49,6 +54,10 @@ class PolicyStore(private val context: Context) {
             prefs[SCREEN_OFF_ALLOWED_KEY] = if (allowed) current + packageName else current - packageName
         }
     }
+
+    suspend fun setScreenOnAllowlistEnabled(enabled: Boolean) {
+        context.policyDataStore.edit { prefs -> prefs[SCREEN_ON_ENABLED_KEY] = enabled }
+    }
 }
 
 class PolicyEngine(context: Context) {
@@ -57,6 +66,7 @@ class PolicyEngine(context: Context) {
     val travelModeEnabled: Flow<Boolean> = store.travelModeEnabled
     val screenOffAllowlistEnabled: Flow<Boolean> = store.screenOffAllowlistEnabled
     val screenOffAllowedPackages: Flow<Set<String>> = store.screenOffAllowedPackages
+    val screenOnAllowlistEnabled: Flow<Boolean> = store.screenOnAllowlistEnabled
 
     suspend fun toggleBlock(packageName: String, blocked: Boolean) {
         store.setBlocked(packageName, blocked)
@@ -72,5 +82,9 @@ class PolicyEngine(context: Context) {
 
     suspend fun setScreenOffAllowed(packageName: String, allowed: Boolean) {
         store.setScreenOffAllowed(packageName, allowed)
+    }
+
+    suspend fun setScreenOnAllowlistEnabled(enabled: Boolean) {
+        store.setScreenOnAllowlistEnabled(enabled)
     }
 }
