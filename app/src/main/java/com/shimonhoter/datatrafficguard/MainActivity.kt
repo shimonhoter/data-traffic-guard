@@ -270,10 +270,10 @@ fun DashboardScaffold(
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var categoryMenuExpanded by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
-    var showScreenOffDialog by remember { mutableStateOf(false) }
     var showAppListDialog by remember { mutableStateOf(false) }
+    var screenOffOnlyFilter by remember { mutableStateOf(false) }
 
-    val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode) {
+    val displayedUsage = remember(usage, searchQuery, categoryFilter, activeOnly, sortMode, screenOffOnlyFilter, screenOffAllowedPackages) {
         usage
             .filter { app ->
                 when (categoryFilter) {
@@ -283,6 +283,7 @@ fun DashboardScaffold(
                 }
             }
             .filter { app -> !activeOnly || app.rxBytesPerSecond > 0 || app.txBytesPerSecond > 0 }
+            .filter { app -> !screenOffOnlyFilter || screenOffAllowedPackages.contains(app.packageName) }
             .filter { app -> searchQuery.isBlank() || app.label.contains(searchQuery, ignoreCase = true) }
             .let { list ->
                 when (sortMode) {
@@ -354,13 +355,14 @@ fun DashboardScaffold(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text("הגבלה כשהמסך כבוי", style = MaterialTheme.typography.titleMedium)
                             Text(
                                 "רק אפליקציות נבחרות ישמרו על גישה לרשת כשהמסך כבוי — פועל גם במצב נסיעה וגם במצב ידני",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
+                        Spacer(modifier = Modifier.width(12.dp))
                         Switch(checked = screenOffAllowlistEnabled, onCheckedChange = onScreenOffAllowlistToggled)
                     }
                     Spacer(modifier = Modifier.height(10.dp))
@@ -373,7 +375,10 @@ fun DashboardScaffold(
                             "${screenOffAllowedPackages.size} אפליקציות מורשות כשהמסך כבוי",
                             style = MaterialTheme.typography.bodySmall
                         )
-                        TextButton(onClick = { showScreenOffDialog = true }) { Text("ערוך רשימה") }
+                        TextButton(onClick = {
+                            screenOffOnlyFilter = true
+                            showAppListDialog = true
+                        }) { Text("ערוך רשימה") }
                     }
                 }
             }
@@ -408,15 +413,6 @@ fun DashboardScaffold(
                 onSetQuota(quotaBytes, thresholdPercent)
                 showQuotaDialog = false
             }
-        )
-    }
-
-    if (showScreenOffDialog) {
-        ScreenOffAllowlistDialog(
-            apps = usage,
-            allowedPackages = screenOffAllowedPackages,
-            onDismiss = { showScreenOffDialog = false },
-            onToggle = onToggleScreenOffAllowed
         )
     }
 
@@ -465,6 +461,13 @@ fun DashboardScaffold(
                         active = activeOnly,
                         onToggle = { activeOnly = it }
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    FilterChip(
+                        selected = screenOffOnlyFilter,
+                        onClick = { screenOffOnlyFilter = !screenOffOnlyFilter },
+                        label = { Text("מותרות במסך כבוי", style = MaterialTheme.typography.labelMedium) },
+                        shape = RoundedCornerShape(50)
+                    )
                 }
                 SortControl(
                     selected = sortMode,
@@ -509,6 +512,8 @@ fun DashboardScaffold(
                         isBlocked = blockedPackages.contains(app.packageName),
                         enabled = !travelModeEnabled,
                         maxBytesToday = maxBytesToday,
+                        screenOffAllowed = screenOffAllowedPackages.contains(app.packageName),
+                        onToggleScreenOffAllowed = { allowed -> onToggleScreenOffAllowed(app.packageName, allowed) },
                         onToggleBlocked = { blocked -> onToggleBlocked(app.packageName, blocked) }
                     )
                 }
@@ -597,6 +602,8 @@ private fun AppUsageRow(
     isBlocked: Boolean,
     enabled: Boolean,
     maxBytesToday: Long,
+    screenOffAllowed: Boolean = false,
+    onToggleScreenOffAllowed: (Boolean) -> Unit = {},
     onToggleBlocked: (Boolean) -> Unit
 ) {
     val barColor = when {
@@ -655,6 +662,13 @@ private fun AppUsageRow(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("מסך כבוי", style = MaterialTheme.typography.labelSmall)
+                    IconToggleButton(checked = screenOffAllowed, onCheckedChange = onToggleScreenOffAllowed) {
+                        Text(if (screenOffAllowed) "🌙✓" else "🌙", style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 Switch(checked = isBlocked, onCheckedChange = onToggleBlocked, enabled = enabled)
@@ -796,37 +810,3 @@ private fun QuotaEditDialog(
 }
 
 
-@Composable
-private fun ScreenOffAllowlistDialog(
-    apps: List<AppUsageSnapshot>,
-    allowedPackages: Set<String>,
-    onDismiss: () -> Unit,
-    onToggle: (String, Boolean) -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("אפליקציות מורשות כשהמסך כבוי") },
-        text = {
-            LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                items(apps.sortedBy { it.label.lowercase() }, key = { it.packageName }) { app ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(app.label, style = MaterialTheme.typography.bodyMedium)
-                        Checkbox(
-                            checked = allowedPackages.contains(app.packageName),
-                            onCheckedChange = { checked -> onToggle(app.packageName, checked) }
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("סגור") }
-        }
-    )
-}
