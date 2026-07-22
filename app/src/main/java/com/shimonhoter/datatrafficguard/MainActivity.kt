@@ -646,7 +646,9 @@ private fun AppListFilterControl(
         }
     }
 }
-(active: Boolean, onToggle: (Boolean) -> Unit) {
+
+@Composable
+private fun ActiveOnlyToggle(active: Boolean, onToggle: (Boolean) -> Unit) {
     Spacer(modifier = Modifier.width(6.dp))
     FilterChip(
         selected = active,
