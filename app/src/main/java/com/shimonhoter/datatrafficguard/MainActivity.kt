@@ -129,9 +129,13 @@ class MainActivity : ComponentActivity() {
 
                     val totalUsedBytesMobile by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
-                            val allPackages = usage.map { it.packageName }.toSet()
+                            // Exclude currently-blocked packages: their traffic is written into our
+                            // sinkhole VPN tunnel and gets phantom-credited by Android even though
+                            // nothing real is sent — only allowed apps' mobile usage is genuine.
+                            val enforced = vpnStatus.enforcedPackages
+                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
                             value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis, includeWifi = false)
+                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis, includeWifi = false)
                             }
                             delay(5000L)
                         }
