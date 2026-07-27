@@ -142,9 +142,12 @@ class MainActivity : ComponentActivity() {
                     }
                     val totalUsedBytesAll by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
-                            val allPackages = usage.map { it.packageName }.toSet()
+                            // Same phantom-credit exclusion as the mobile-only counter — otherwise
+                            // blocked apps' sinkholed writes inflate this total too.
+                            val enforced = vpnStatus.enforcedPackages
+                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
                             value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis, includeWifi = true)
+                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis, includeWifi = true)
                             }
                             delay(5000L)
                         }
