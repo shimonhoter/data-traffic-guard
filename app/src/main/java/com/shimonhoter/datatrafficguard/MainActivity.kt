@@ -127,11 +127,20 @@ class MainActivity : ComponentActivity() {
                     val screenOnAllowlistEnabled by policyEngine.screenOnAllowlistEnabled.collectAsState(initial = false)
                     val screenOnAllowedPackages by policyEngine.screenOnAllowedPackages.collectAsState(initial = emptySet())
 
-                    val totalUsedBytes by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
+                    val totalUsedBytesMobile by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
                         while (true) {
                             val allPackages = usage.map { it.packageName }.toSet()
                             value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis)
+                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis, includeWifi = false)
+                            }
+                            delay(5000L)
+                        }
+                    }
+                    val totalUsedBytesAll by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
+                        while (true) {
+                            val allPackages = usage.map { it.packageName }.toSet()
+                            value = withContext(Dispatchers.Default) {
+                                repository.bytesForPackagesSince(allPackages, quotaSettings.cycleStartMillis, includeWifi = true)
                             }
                             delay(5000L)
                         }
@@ -147,7 +156,8 @@ class MainActivity : ComponentActivity() {
                         travelModeEnabled = travelModeEnabled,
                         vpnStatus = vpnStatus,
                         quotaSettings = quotaSettings,
-                        totalUsedBytes = totalUsedBytes,
+                        totalUsedBytes = totalUsedBytesMobile,
+                        totalUsedBytesAll = totalUsedBytesAll,
                         screenOffAllowlistEnabled = screenOffAllowlistEnabled,
                         screenOffAllowedPackages = screenOffAllowedPackages,
                         onToggleBlocked = { pkg, blocked ->
@@ -284,6 +294,7 @@ fun DashboardScaffold(
     vpnStatus: VpnStatus = VpnStatus(tunnelActive = false),
     quotaSettings: QuotaSettings = QuotaSettings(),
     totalUsedBytes: Long = 0L,
+    totalUsedBytesAll: Long = 0L,
     screenOffAllowlistEnabled: Boolean = false,
     screenOffAllowedPackages: Set<String> = emptySet(),
     onToggleBlocked: (String, Boolean) -> Unit = { _, _ -> },
@@ -471,6 +482,23 @@ fun DashboardScaffold(
                 onEditClick = { showQuotaDialog = true },
                 onResetCycle = onResetCycle
             )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("סה\"כ כולל WiFi", style = MaterialTheme.typography.bodyMedium)
+                    Text(formatBytes(totalUsedBytesAll), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 

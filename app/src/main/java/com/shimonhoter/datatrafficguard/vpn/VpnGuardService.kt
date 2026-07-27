@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -56,6 +58,11 @@ class VpnGuardService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "VpnGuardService"
         private const val TRAVEL_POLL_MS = 1500L
+        private const val MANUAL_POLL_MS = 2000L
+        /** Always gets network when it's genuinely the foreground app, regardless of which
+         *  restriction mode is active — lets you manually browse/download in Play Store while
+         *  still blocking its background auto-update traffic. */
+        private const val PLAY_STORE_PACKAGE = "com.android.vending"
 
         private val _status = MutableStateFlow(VpnStatus(tunnelActive = false))
         val status: StateFlow<VpnStatus> = _status.asStateFlow()
@@ -67,13 +74,14 @@ class VpnGuardService : VpnService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var travelJob: Job? = null
+    private var manualJob: Job? = null
     private val foregroundWatcher = ForegroundWatcher()
     /** Bumped on every onStartCommand so a stale, still-finishing travel tick can never
      *  clobber a newer command (e.g. re-establishing the tunnel right after it was told to stop). */
     private val currentGeneration = AtomicInteger(0)
 
-    // Latest known config, kept so the screen receiver can recompute enforcement
-    // for Manual mode without needing a fresh Intent from the app.
+    // Latest known config, kept so the screen receiver and manual poll loop can recompute
+    // enforcement without needing a fresh Intent from the app.
     private var currentMode: GuardMode = GuardMode.MANUAL
     private var currentManualBlocked: Set<String> = emptySet()
     private var screenOffAllowlistEnabled: Boolean = false
@@ -123,11 +131,13 @@ class VpnGuardService : VpnService() {
 
         travelJob?.cancel()
         travelJob = null
+        manualJob?.cancel()
+        manualJob = null
 
         if (mode == GuardMode.TRAVEL) {
             startTravelMode(generation)
         } else {
-            rebuild(effectiveManualBlocked(), GuardMode.MANUAL, null, generation)
+            startManualPoll(generation)
         }
         return START_STICKY
     }
@@ -137,13 +147,26 @@ class VpnGuardService : VpnService() {
         return pm != null && !pm.isInteractive
     }
 
-    /** Manual mode's effective blocked set. Both restriction modes share the same
-     *  selected-apps list (screenOffAllowedPackages); only which flag is enabled decides
-     *  whether that list is the screen-off allowlist or the screen-on allowlist. The
-     *  manual per-app block list always applies on top of whichever mode is active. */
+    private fun isOnWifi(): Boolean {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    private fun currentForegroundPackageOrNull(): String? =
+        try { foregroundWatcher.currentForegroundPackage(this) } catch (e: Exception) { null }
+
+    /** Manual mode's effective blocked set. WiFi always takes priority — nothing is
+     *  restricted while connected to WiFi, regardless of mode. Otherwise, both restriction
+     *  modes share the same selected-apps list (screenOffAllowedPackages); only which flag is
+     *  enabled decides whether that list is the screen-off allowlist or the screen-on
+     *  allowlist. The manual per-app block list always applies on top of whichever mode is
+     *  active, and Google Play always gets network when it's genuinely in the foreground. */
     private fun effectiveManualBlocked(): Set<String> {
+        if (isOnWifi()) return emptySet()
         val screenOff = isScreenOff()
-        return when {
+        val base = when {
             screenOffAllowlistEnabled && screenOff -> {
                 val allowed = (computeWhitelist() + screenOffAllowedPackages) - currentManualBlocked
                 allNetworkPackages() - allowed
@@ -158,6 +181,27 @@ class VpnGuardService : VpnService() {
             }
             else -> currentManualBlocked
         }
+        return if (currentForegroundPackageOrNull() == PLAY_STORE_PACKAGE) base - PLAY_STORE_PACKAGE else base
+    }
+
+    /** Keeps re-evaluating effectiveManualBlocked() so Google Play's foreground status and
+     *  WiFi connectivity are reflected quickly, without waiting for the next screen event. */
+    private fun startManualPoll(generation: Int) {
+        manualJob = serviceScope.launch {
+            var lastBlocked: Set<String>? = null
+            while (isActive && generation == currentGeneration.get()) {
+                try {
+                    val blocked = effectiveManualBlocked()
+                    if (blocked != lastBlocked) {
+                        rebuild(blocked, GuardMode.MANUAL, null, generation)
+                        lastBlocked = blocked
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Manual mode tick failed", e)
+                }
+                delay(MANUAL_POLL_MS)
+            }
+        }
     }
 
     private fun startTravelMode(generation: Int) {
@@ -169,7 +213,9 @@ class VpnGuardService : VpnService() {
                     val whitelist = computeWhitelist()
                     val allNetworkPkgs = allNetworkPackages()
                     val foreground = if (screenOff) null else foregroundWatcher.currentForegroundPackage(this@VpnGuardService)
-                    val allowedBase = if (screenOffAllowlistEnabled && screenOff) {
+                    val allowedBase = if (isOnWifi()) {
+                        allNetworkPkgs
+                    } else if (screenOffAllowlistEnabled && screenOff) {
                         whitelist + screenOffAllowedPackages
                     } else {
                         whitelist + (foreground?.let { setOf(it) } ?: emptySet())
@@ -227,9 +273,10 @@ class VpnGuardService : VpnService() {
         if (blockedPackages.isEmpty()) {
             Log.i(TAG, "No blocked packages — guard idle.")
             _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp)
-            // Keep the service alive in Manual mode when the screen-off allowlist is on:
-            // there's nothing to block right now, but the screen turning off may change that.
-            if (mode == GuardMode.MANUAL && !screenOffAllowlistEnabled) stopSelf()
+            // Keep the service alive in Manual mode when a restriction mode or the screen-off
+            // allowlist is on: there's nothing to block right now, but the screen turning off,
+            // WiFi disconnecting, or Play Store leaving the foreground may change that.
+            if (mode == GuardMode.MANUAL && !screenOffAllowlistEnabled && !screenOnAllowlistEnabled) stopSelf()
             return
         }
 
@@ -324,6 +371,7 @@ class VpnGuardService : VpnService() {
     override fun onDestroy() {
         currentGeneration.incrementAndGet()
         travelJob?.cancel()
+        manualJob?.cancel()
         serviceScope.cancel()
         closeTunnel()
         unregisterScreenReceiverSafely()
@@ -334,6 +382,7 @@ class VpnGuardService : VpnService() {
     override fun onRevoke() {
         currentGeneration.incrementAndGet()
         travelJob?.cancel()
+        manualJob?.cancel()
         closeTunnel()
         unregisterScreenReceiverSafely()
         _status.value = VpnStatus(tunnelActive = false, lastError = "הרשאת VPN בוטלה על ידי המשתמש")

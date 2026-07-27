@@ -55,9 +55,16 @@ class DataUsageRepository(private val context: Context) {
             .toList()
     }
 
-    private fun queryAllUidBytes(startMillis: Long, endMillis: Long): Map<Int, Pair<Long, Long>> {
+    private val defaultNetworkTypes = intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)
+    private val mobileOnlyNetworkTypes = intArrayOf(ConnectivityManager.TYPE_MOBILE)
+
+    private fun queryAllUidBytes(
+        startMillis: Long,
+        endMillis: Long,
+        networkTypes: IntArray = defaultNetworkTypes
+    ): Map<Int, Pair<Long, Long>> {
         val totals = HashMap<Int, Pair<Long, Long>>()
-        for (networkType in intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)) {
+        for (networkType in networkTypes) {
             try {
                 val bucket = NetworkStats.Bucket()
                 val stats = networkStatsManager.querySummary(networkType, null, startMillis, endMillis)
@@ -83,7 +90,7 @@ class DataUsageRepository(private val context: Context) {
         val now = System.currentTimeMillis()
         if (startMillis <= 0L || startMillis >= now) return 0L
         var total = 0L
-        for (networkType in intArrayOf(ConnectivityManager.TYPE_MOBILE, ConnectivityManager.TYPE_WIFI)) {
+        for (networkType in defaultNetworkTypes) {
             try {
                 val bucket = networkStatsManager.querySummaryForDevice(networkType, null, startMillis, now)
                 total += bucket.rxBytes + bucket.txBytes
@@ -95,21 +102,19 @@ class DataUsageRepository(private val context: Context) {
     }
 
     /**
-     * Sum of bytes attributed to specific packages over [startMillis, now]. Used to back the
-     * "blocked apps" portion out of the device-wide total: when our sinkhole VPN is active,
-     * Android's OS-level traffic accounting re-credits bytes an app merely *wrote into the
-     * tunnel* onto mobile/WiFi for per-app reporting — even when nothing ever actually left
-     * the device (confirmed: this grows in airplane mode with zero networks). Device-wide
-     * totals inherit that same phantom credit, so we subtract it back out.
+     * Sum of bytes attributed to specific packages over [startMillis, now]. Pass
+     * includeWifi = false to get a mobile-data-only total (for tracking a limited data
+     * package), or leave it true for the combined mobile+WiFi total.
      */
-    fun bytesForPackagesSince(packageNames: Set<String>, startMillis: Long): Long {
+    fun bytesForPackagesSince(packageNames: Set<String>, startMillis: Long, includeWifi: Boolean = true): Long {
         if (packageNames.isEmpty()) return 0L
         val now = System.currentTimeMillis()
         if (startMillis <= 0L || startMillis >= now) return 0L
         val uidByPackage = try { networkApps().associate { it.packageName to it.uid } } catch (e: Exception) { return 0L }
         val uids = packageNames.mapNotNull { uidByPackage[it] }.toSet()
         if (uids.isEmpty()) return 0L
-        val totals = queryAllUidBytes(startMillis, now)
+        val networkTypes = if (includeWifi) defaultNetworkTypes else mobileOnlyNetworkTypes
+        val totals = queryAllUidBytes(startMillis, now, networkTypes)
         return uids.sumOf { uid -> (totals[uid]?.first ?: 0L) + (totals[uid]?.second ?: 0L) }
     }
 
