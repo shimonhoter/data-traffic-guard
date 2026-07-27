@@ -19,7 +19,9 @@ import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.util.Log
 import com.shimonhoter.datatrafficguard.MainActivity
+import com.shimonhoter.datatrafficguard.monitor.DataUsageRepository
 import com.shimonhoter.datatrafficguard.monitor.ForegroundWatcher
+import com.shimonhoter.datatrafficguard.quota.QuotaEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,6 +61,7 @@ class VpnGuardService : VpnService() {
         private const val TAG = "VpnGuardService"
         private const val TRAVEL_POLL_MS = 1500L
         private const val MANUAL_POLL_MS = 2000L
+        private const val USAGE_TICK_MS = 5000L
         /** Always gets network when it's genuinely the foreground app, regardless of which
          *  restriction mode is active — lets you manually browse/download in Play Store while
          *  still blocking its background auto-update traffic. */
@@ -75,7 +78,10 @@ class VpnGuardService : VpnService() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var travelJob: Job? = null
     private var manualJob: Job? = null
+    private var usageTrackingJob: Job? = null
     private val foregroundWatcher = ForegroundWatcher()
+    private val quotaEngine by lazy { QuotaEngine(this) }
+    private val usageRepository by lazy { DataUsageRepository(this) }
     /** Bumped on every onStartCommand so a stale, still-finishing travel tick can never
      *  clobber a newer command (e.g. re-establishing the tunnel right after it was told to stop). */
     private val currentGeneration = AtomicInteger(0)
@@ -116,6 +122,7 @@ class VpnGuardService : VpnService() {
             registerReceiver(screenReceiver, filter)
         }
         screenReceiverRegistered = true
+        startUsageTracking()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -239,6 +246,32 @@ class VpnGuardService : VpnService() {
         }
     }
 
+    /** Runs for the entire lifetime of the service, independent of mode/generation, so the
+     *  cumulative usage counters keep building correctly across mode switches and even while
+     *  nothing is currently being blocked. Only ever adds real per-tick deltas for whichever
+     *  packages are actually allowed at that moment — never recomputed from the whole cycle,
+     *  so it can't jump when the active mode changes. */
+    private fun startUsageTracking() {
+        usageTrackingJob = serviceScope.launch {
+            var lastTick = quotaEngine.getLastTickMillis()
+            while (isActive) {
+                delay(USAGE_TICK_MS)
+                val now = System.currentTimeMillis()
+                try {
+                    val status = _status.value
+                    val enforced = if (status.tunnelActive) status.enforcedPackages else emptySet()
+                    val allowed = allNetworkPackages() - enforced
+                    val mobileDelta = usageRepository.bytesForPackagesSince(allowed, lastTick, includeWifi = false)
+                    val allDelta = usageRepository.bytesForPackagesSince(allowed, lastTick, includeWifi = true)
+                    quotaEngine.addUsageDelta(mobileDelta, allDelta, now)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Usage tracking tick failed", e)
+                }
+                lastTick = now
+            }
+        }
+    }
+
     private fun allNetworkPackages(): Set<String> {
         @Suppress("DEPRECATION") val apps = packageManager.getInstalledApplications(0)
         return apps.asSequence()
@@ -271,12 +304,8 @@ class VpnGuardService : VpnService() {
         closeTunnel()
 
         if (blockedPackages.isEmpty()) {
-            Log.i(TAG, "No blocked packages — guard idle.")
+            Log.i(TAG, "No blocked packages — guard idle (service stays alive for usage tracking).")
             _status.value = VpnStatus(tunnelActive = false, mode = mode, currentForegroundApp = foregroundApp)
-            // Keep the service alive in Manual mode when a restriction mode or the screen-off
-            // allowlist is on: there's nothing to block right now, but the screen turning off,
-            // WiFi disconnecting, or Play Store leaving the foreground may change that.
-            if (mode == GuardMode.MANUAL && !screenOffAllowlistEnabled && !screenOnAllowlistEnabled) stopSelf()
             return
         }
 
@@ -372,6 +401,7 @@ class VpnGuardService : VpnService() {
         currentGeneration.incrementAndGet()
         travelJob?.cancel()
         manualJob?.cancel()
+        usageTrackingJob?.cancel()
         serviceScope.cancel()
         closeTunnel()
         unregisterScreenReceiverSafely()

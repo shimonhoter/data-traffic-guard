@@ -127,31 +127,8 @@ class MainActivity : ComponentActivity() {
                     val screenOnAllowlistEnabled by policyEngine.screenOnAllowlistEnabled.collectAsState(initial = false)
                     val screenOnAllowedPackages by policyEngine.screenOnAllowedPackages.collectAsState(initial = emptySet())
 
-                    val totalUsedBytesMobile by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
-                        while (true) {
-                            // Exclude currently-blocked packages: their traffic is written into our
-                            // sinkhole VPN tunnel and gets phantom-credited by Android even though
-                            // nothing real is sent — only allowed apps' mobile usage is genuine.
-                            val enforced = vpnStatus.enforcedPackages
-                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
-                            value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis, includeWifi = false)
-                            }
-                            delay(5000L)
-                        }
-                    }
-                    val totalUsedBytesAll by produceState(initialValue = 0L, quotaSettings.cycleStartMillis) {
-                        while (true) {
-                            // Same phantom-credit exclusion as the mobile-only counter — otherwise
-                            // blocked apps' sinkholed writes inflate this total too.
-                            val enforced = vpnStatus.enforcedPackages
-                            val allowedPackages = usage.map { it.packageName }.filterNot { enforced.contains(it) }.toSet()
-                            value = withContext(Dispatchers.Default) {
-                                repository.bytesForPackagesSince(allowedPackages, quotaSettings.cycleStartMillis, includeWifi = true)
-                            }
-                            delay(5000L)
-                        }
-                    }
+                    val totalUsedBytesMobile = quotaSettings.accumulatedMobileBytes
+                    val totalUsedBytesAll = quotaSettings.accumulatedAllBytes
 
                     LaunchedEffect(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled, screenOnAllowedPackages) {
                         applyPolicy(travelModeEnabled, blockedPackages, screenOffAllowlistEnabled, screenOffAllowedPackages, screenOnAllowlistEnabled, screenOnAllowedPackages)
